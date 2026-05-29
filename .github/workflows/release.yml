@@ -15,7 +15,10 @@ jobs:
     name: Build
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v1
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
 
       - name: Print version info
         id: semver
@@ -44,10 +47,17 @@ jobs:
         run: |
           make release COMPRESS=yes
 
+      - name: Determine tag
+        id: tag
+        run: |
+          TAG=$(git describe --exact-match --abbrev=0 2>/dev/null || echo "")
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
       - name: Release
         uses: softprops/action-gh-release@v1
-        if: startsWith(github.ref, 'refs/tags/')
+        if: steps.tag.outputs.tag != ''
         with:
+          tag_name: ${{ steps.tag.outputs.tag }}
           files: |
             bin/guard-darwin-amd64.tar.gz
             bin/guard-linux-amd64.tar.gz
