@@ -220,6 +220,16 @@ bin/.container-$(DOTFILE_IMAGE)-%: $(OUTBIN) $(DOCKERFILE_%)
 	@docker images -q $(IMAGE):$(TAG_$*) > $@
 	@echo
 
+.PHONY: container-smoke
+# container-smoke builds the PROD image and verifies the binary actually starts -
+# catching entrypoint, base-image and packaging breakage that compiling alone misses.
+# The PROD base image is distroless (no shell), so only direct args work.
+container-smoke: bin/.container-$(DOTFILE_IMAGE)-PROD
+	@echo "=== image smoke test: $(IMAGE):$(TAG_PROD) ==="
+	@docker run --rm $(IMAGE):$(TAG_PROD) version
+	@docker run --rm $(IMAGE):$(TAG_PROD) --help > /dev/null
+	@echo "OK: image starts; 'version' and '--help' both exit 0"
+
 push: bin/.push-$(DOTFILE_IMAGE)-PROD bin/.push-$(DOTFILE_IMAGE)-DBG
 bin/.push-$(DOTFILE_IMAGE)-%: bin/.container-$(DOTFILE_IMAGE)-%
 	@docker push $(IMAGE):$(TAG_$*)
