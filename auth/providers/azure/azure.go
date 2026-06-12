@@ -28,7 +28,6 @@ import (
 	"go.kubeguard.dev/guard/auth"
 	"go.kubeguard.dev/guard/auth/providers/azure/graph"
 	azureutils "go.kubeguard.dev/guard/util/azure"
-	errutils "go.kubeguard.dev/guard/util/error"
 
 	"github.com/Azure/go-autorest/autorest/azure"
 	"github.com/coreos/go-oidc"
@@ -276,34 +275,22 @@ func (s Authenticator) Check(ctx context.Context, token string) (*authv1.UserInf
 			resp.Groups = groups
 			return resp, nil
 		}
-		// Service principal token with >200 groups. OBO flow does not
-		// support SPNs, so short-circuit instead of letting AAD fail with
-		// a cryptic AADSTS7000113.
-		//
-		// StatusOK: K8s webhook authenticator only reads and logs
-		// TokenReview Status.Error on HTTP 200. Non-200 is treated as a
-		// transport error and the message is discarded. We need this error
-		// to surface in API server logs so operators can diagnose why the
-		// SPN authentication was rejected.
-		if isAppToken(claims) {
-			return nil, errutils.WithCode(
-				fmt.Errorf(
-					"service principal with group membership exceeding 200 is not supported. "+
-						"See https://learn.microsoft.com/en-us/azure/aks/kubelogin-authentication#kubelogin-authentication-in-aks-limitations",
-				),
-				http.StatusOK,
-			)
-		}
 	}
 	if !s.Options.SkipGroupMembershipResolution {
-		if err := s.graphClient.RefreshToken(ctx, token); err != nil {
-			return nil, err
+		if isAppToken(claims) {
+			if err := s.graphClient.RefreshToken(ctx, token); err != nil {
+				return nil, err
+			}
+			resp.Groups, err = s.graphClient.GetSPMemberObjects(ctx, resp.Username, token)
+		} else {
+			if err := s.graphClient.RefreshToken(ctx, token); err != nil {
+				return nil, err
+			}
+			resp.Groups, err = s.graphClient.GetGroups(ctx, resp.Username, token)
 		}
-		resp.Groups, err = s.graphClient.GetGroups(ctx, resp.Username, token)
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to get groups")
 		}
-
 	}
 	return resp, nil
 }

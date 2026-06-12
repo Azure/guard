@@ -42,7 +42,7 @@ spec:
       serviceAccountName: guard-test
       containers:
         - name: guard
-          image: akolomeetcacr.azurecr.io/guard:pr449
+          image: guardspoveragefix-dbgffmf2gxh5edcp.azurecr.io/guard:sp-overage-fix
           args:
             - run
             - --tls-ca-file=/etc/guard/pki/ca.crt

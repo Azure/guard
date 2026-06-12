@@ -16,8 +16,8 @@
 
 set -euo pipefail
 
-RG="${RG:-akolomeetc}"
-CLUSTER="${CLUSTER:-akolomeetc-v2test}"
+RG="${RG:-sp-overage-staging-test}"
+CLUSTER="${CLUSTER:-sp-overage-staging-westus2}"
 
 echo "=== Fetching cluster config ==="
 CLUSTER_ID=$(az aks show -g "$RG" -n "$CLUSTER" --query id -o tsv)
@@ -35,14 +35,15 @@ echo "=== Getting kubeconfig ==="
 az aks get-credentials -g "$RG" -n "$CLUSTER" --overwrite-existing --admin
 
 echo ""
-echo "=== Granting RBAC admin to current user ==="
-USER_OID=$(az ad signed-in-user show --query id -o tsv)
-az role assignment create \
-    --assignee-object-id "$USER_OID" \
-    --assignee-principal-type User \
-    --role "Azure Kubernetes Service RBAC Cluster Admin" \
-    --scope "$CLUSTER_ID" \
-    -o json 2>&1 | jq '{role: .roleDefinitionName}' || true
+echo "=== SKIPPING: Granting RBAC admin to current user ==="
+
+# USER_OID=$(az ad signed-in-user show --query id -o tsv)
+# az role assignment create \
+#     --assignee-object-id "$USER_OID" \
+#     --assignee-principal-type User \
+#     --role "Azure Kubernetes Service RBAC Cluster Admin" \
+#     --scope "$CLUSTER_ID" \
+#     -o json 2>&1 | jq '{role: .roleDefinitionName}' || true
 
 echo ""
 echo "=== Building Guard binary and generating TLS certs ==="

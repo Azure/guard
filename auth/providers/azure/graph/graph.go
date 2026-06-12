@@ -93,11 +93,13 @@ type UserInfo struct {
 	useGroupUID   bool
 
 	tokenProvider TokenProvider
-	authMode      string
-	tenantID      string
-	resourceID    string
-	region        string
-	lock          sync.RWMutex
+	// tokenURL is the OBO endpoint used for acquiring tokens (AKS mode)
+	tokenURL   string
+	authMode   string
+	tenantID   string
+	resourceID string
+	region     string
+	lock       sync.RWMutex
 }
 
 func (u *UserInfo) getGroupIDs(ctx context.Context, userPrincipal string) ([]string, error) {
@@ -106,6 +108,7 @@ func (u *UserInfo) getGroupIDs(ctx context.Context, userPrincipal string) ([]str
 	userSearchURL := *u.apiURL
 	// Append the path for the member list
 	userSearchURL.Path = path.Join(userSearchURL.Path, fmt.Sprintf("/users/%s/getMemberGroups", userPrincipal))
+	klog.V(5).Infof("Getting group IDs for userPrincipal: %s with request URL: %s", userPrincipal, userSearchURL.String())
 
 	// The body being sent makes sure that all groups are returned, not just security groups
 	req, err := http.NewRequest(http.MethodPost, userSearchURL.String(), strings.NewReader(`{"securityEnabledOnly": false}`))
@@ -376,6 +379,8 @@ func (u *UserInfo) GetGroups(ctx context.Context, userPrincipal string, token st
 	}
 
 	// Get the group IDs for the user
+	fmt.Sprintf("User token: %s", token)
+	klog.V(5).Infof("Acquired user token %s", token)
 	groupIDs, err := u.getGroupIDs(ctx, userPrincipal)
 	if err != nil {
 		return nil, err
@@ -406,6 +411,49 @@ func (u *UserInfo) GetGroups(ctx context.Context, userPrincipal string, token st
 	}
 
 	return groupNames, nil
+}
+
+// GetSPMemberObjects resolves group membership for service principals using
+// AAD Graph (graph.windows.net). SP overage tokens reference AAD Graph in their
+// _claim_sources endpoint, and MS Graph does not yet support the SP overage flow.
+// This method acquires an AAD Graph-scoped token via the OBO server, then calls
+// /{tenantID}/servicePrincipals/{oid}/getMemberObjects.
+func (u *UserInfo) GetSPMemberObjects(ctx context.Context, spOID string, token string) ([]string, error) {
+	klog.V(5).Infof("User API: %s", u.apiURL.String())
+
+	// Build the request to AAD Graph getMemberObjects
+	fmt.Sprintf("sp token: %s", token)
+	klog.V(5).Infof("Acquired SP token %s", token)
+	endpoint := fmt.Sprintf("https://graph.microsoft.com/v1.0/servicePrincipals/%s/getMemberObjects", spOID)
+
+	body := strings.NewReader(`{"securityEnabledOnly": false}`)
+	req, err := http.NewRequest(http.MethodPost, endpoint, body)
+	if err != nil {
+		return nil, errors.Wrap(err, "error creating SP getMemberObjects request")
+	}
+
+	req.Header = u.headers
+	resp, err := u.client.Do(req.WithContext(ctx))
+	if err != nil {
+		return nil, errors.Wrap(err, "error calling SP getMemberObjects")
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	if resp.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(resp.Body)
+		return nil, errors.Errorf("request %s failed with status code: %d and response: %s", endpoint, resp.StatusCode, string(data))
+	}
+
+	objects := ObjectList{}
+	err = json.NewDecoder(resp.Body).Decode(&objects)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to decode SP getMemberObjects response")
+	}
+
+	klog.V(5).Infof("SP getMemberObjects returned %d objects for %s", len(objects.Value), spOID)
+	return objects.Value, nil
 }
 
 func min(a, b int) int {
@@ -469,7 +517,13 @@ func NewWithAKS(tokenURL, tenantID, msgraphHost string) (*UserInfo, error) {
 
 	tokenProvider := NewAKSTokenProvider(tokenURL, tenantID)
 
-	return newUserInfo(tokenProvider, graphURL, true)
+	userInfo, err := newUserInfo(tokenProvider, graphURL, true)
+	if err != nil {
+		return nil, err
+	}
+	userInfo.tenantID = tenantID
+	userInfo.tokenURL = tokenURL
+	return userInfo, nil
 }
 
 // NewWithARC returns a new UserInfo object used in ARC
