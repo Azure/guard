@@ -11,8 +11,9 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/hashicorp/go-retryablehttp"
 	azureutils "go.kubeguard.dev/guard/util/azure"
+
+	"github.com/hashicorp/go-retryablehttp"
 )
 
 var (
