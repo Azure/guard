@@ -20,10 +20,10 @@ import (
 	"context"
 )
 
-type AccessTokenVerifier interface {
-	Verify(ctx context.Context, rawAccessToken string) (VerifiedAccessToken, error)
+type accessTokenVerifier interface {
+	Verify(ctx context.Context, rawAccessToken string) (verifiedAccessToken, error)
 }
 
-type VerifiedAccessToken interface {
+type verifiedAccessToken interface {
 	Claims() (claims, error)
 }

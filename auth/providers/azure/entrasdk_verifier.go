@@ -33,24 +33,24 @@ import (
 )
 
 var (
-	_ AccessTokenVerifier = (*EntraSDKTokenVerifier)(nil)
-	_ VerifiedAccessToken = (*staticClaimsToken)(nil)
+	_ accessTokenVerifier = (*entraSDKTokenVerifier)(nil)
+	_ verifiedAccessToken = (*staticClaimsToken)(nil)
 )
 
-type EntraSDKTokenVerifier struct {
+type entraSDKTokenVerifier struct {
 	baseURL              *url.URL
 	clientID             string
 	verifyClientID       bool
 	httpClientRetryCount int
 }
 
-func newEntraSDKTokenVerifier(rawBaseURL, clientID string, verifyClientID bool, httpClientRetryCount int) (*EntraSDKTokenVerifier, error) {
+func newEntraSDKTokenVerifier(rawBaseURL, clientID string, verifyClientID bool, httpClientRetryCount int) (*entraSDKTokenVerifier, error) {
 	parsedBaseURL, err := parseEntraSDKBaseURL(rawBaseURL)
 	if err != nil {
 		return nil, err
 	}
 
-	return &EntraSDKTokenVerifier{
+	return &entraSDKTokenVerifier{
 		baseURL:              parsedBaseURL,
 		clientID:             clientID,
 		verifyClientID:       verifyClientID,
@@ -81,7 +81,7 @@ func parseEntraSDKBaseURL(rawBaseURL string) (*url.URL, error) {
 	}, nil
 }
 
-func (e *EntraSDKTokenVerifier) Verify(ctx context.Context, rawAccessToken string) (VerifiedAccessToken, error) {
+func (e *entraSDKTokenVerifier) Verify(ctx context.Context, rawAccessToken string) (verifiedAccessToken, error) {
 	if e.baseURL == nil {
 		return nil, fmt.Errorf("Entra SDK verifier is not initialized")
 	}
@@ -209,7 +209,9 @@ func parseEntraSDKError(statusCode int, body []byte) error {
 }
 
 func isExpectedEntraSDKValidationStatus(statusCode int) bool {
-	return statusCode >= http.StatusBadRequest && statusCode < http.StatusInternalServerError
+	return statusCode == http.StatusBadRequest ||
+		statusCode == http.StatusUnauthorized ||
+		statusCode == http.StatusForbidden
 }
 
 func buildTokenValidationError(reason string) error {
@@ -226,12 +228,6 @@ func audienceContains(audienceClaim interface{}, expectedAudience string) bool {
 	switch aud := audienceClaim.(type) {
 	case string:
 		return aud == expectedAudience
-	case []string:
-		for _, value := range aud {
-			if value == expectedAudience {
-				return true
-			}
-		}
 	case []interface{}:
 		for _, value := range aud {
 			if audValue, ok := value.(string); ok && audValue == expectedAudience {

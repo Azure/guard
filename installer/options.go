@@ -135,7 +135,7 @@ func (o *AuthOptions) Validate() []error {
 		}
 		errs = append(errs, azureOpts.Validate()...)
 		if o.UseAzureEntraSDK {
-			if _, err := o.Azure.EntraSDKEnvVars(); err != nil {
+			if _, err := entraSDKEnvVars(azureOpts); err != nil {
 				errs = append(errs, err)
 			}
 		}

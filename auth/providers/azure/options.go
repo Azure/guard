@@ -18,7 +18,6 @@ package azure
 
 import (
 	"fmt"
-	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -146,40 +145,30 @@ func (o *Options) Validate() []error {
 		errs = append(errs, errors.New("azure.pop-hostname must be non-empty when pop token is enabled"))
 	}
 	if o.EntraSDKURL != "" {
-		// Validate the URL
-		parsed, err := url.ParseRequestURI(o.EntraSDKURL)
-		if err != nil {
-			errs = append(errs, errors.Wrap(err, "azure.entra-sdk-url is not a valid URL"))
-		} else if parsed.Path != "" && parsed.Path != "/" {
-			errs = append(errs, errors.New("azure.entra-sdk-url must be a base URL"))
+		if _, err := parseEntraSDKBaseURL(o.EntraSDKURL); err != nil {
+			errs = append(errs, errors.Wrap(err, "azure.entra-sdk-url"))
 		}
 
-		if _, err := o.EntraSDKEnvVars(); err != nil {
+		if err := o.validateEntraSDKConfig(); err != nil {
 			errs = append(errs, err)
 		}
 	}
 	return errs
 }
 
-func (o Options) EntraSDKEnvVars() ([]core.EnvVar, error) {
+func (o Options) validateEntraSDKConfig() error {
 	if o.ClientID == "" {
-		return nil, errors.New("azure.client-id must be non-empty when Entra SDK is enabled")
+		return errors.New("azure.client-id must be non-empty when Entra SDK is enabled")
 	}
 	if o.TenantID == "" {
-		return nil, errors.New("azure.tenant-id must be non-empty when Entra SDK is enabled")
+		return errors.New("azure.tenant-id must be non-empty when Entra SDK is enabled")
 	}
 
-	env, err := resolveAzureEnvironment(o.Environment)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to resolve Entra SDK Azure AD instance")
+	if _, err := resolveAzureEnvironment(o.Environment); err != nil {
+		return errors.Wrap(err, "failed to resolve Entra SDK Azure AD instance")
 	}
 
-	return []core.EnvVar{
-		{Name: "AzureAd__Instance", Value: env.ActiveDirectoryEndpoint},
-		{Name: "AzureAd__TenantId", Value: o.TenantID},
-		{Name: "AzureAd__ClientId", Value: o.ClientID},
-		{Name: "AzureAd__Audience", Value: o.ClientID},
-	}, nil
+	return nil
 }
 
 func (o Options) Apply(d *apps.Deployment) (extraObjs []runtime.Object, err error) {

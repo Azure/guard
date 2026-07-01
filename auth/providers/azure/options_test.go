@@ -132,7 +132,7 @@ var validationErrorData = []struct {
 			o.EntraSDKURL = "://bad-url"
 			return o
 		},
-		errors.New("azure.entra-sdk-url is not a valid URL: parse \"://bad-url\": missing protocol scheme"),
+		errors.New("azure.entra-sdk-url: invalid Entra SDK endpoint: parse \"://bad-url\": missing protocol scheme"),
 		false,
 	},
 	{
@@ -141,7 +141,7 @@ var validationErrorData = []struct {
 			o.EntraSDKURL = localEntraSDKBaseURL + "/Validate"
 			return o
 		},
-		errors.New("azure.entra-sdk-url must be a base URL"),
+		errors.New("azure.entra-sdk-url: Entra SDK endpoint must be a base URL"),
 		false,
 	},
 	{
@@ -239,35 +239,6 @@ func TestOptionsValidate(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestOptionsEntraSDKEnvVars(t *testing.T) {
-	t.Run("returns expected env vars for public cloud", func(t *testing.T) {
-		envVars, err := Options{
-			ClientID: "client-id",
-			TenantID: "tenant-id",
-		}.EntraSDKEnvVars()
-
-		if assert.NoError(t, err) {
-			assert.Equal(t, []string{"AzureAd__Instance", "AzureAd__TenantId", "AzureAd__ClientId", "AzureAd__Audience"}, []string{envVars[0].Name, envVars[1].Name, envVars[2].Name, envVars[3].Name})
-			assert.Equal(t, "https://login.microsoftonline.com/", envVars[0].Value)
-			assert.Equal(t, "tenant-id", envVars[1].Value)
-			assert.Equal(t, "client-id", envVars[2].Value)
-			assert.Equal(t, "client-id", envVars[3].Value)
-		}
-	})
-
-	t.Run("uses the configured Azure environment", func(t *testing.T) {
-		envVars, err := Options{
-			Environment: "AzureChinaCloud",
-			ClientID:    "client-id",
-			TenantID:    "tenant-id",
-		}.EntraSDKEnvVars()
-
-		if assert.NoError(t, err) {
-			assert.Equal(t, "https://login.chinacloudapi.cn/", envVars[0].Value)
-		}
-	})
 }
 
 func TestOptionsApplyIncludesSkipGroupMembershipResolutionArg(t *testing.T) {

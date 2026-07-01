@@ -128,7 +128,7 @@ func newDeployment(authopts AuthOptions, authzopts AuthzOptions) (objects []runt
 		})
 	}
 	if authopts.AuthProvider.Has(azure.OrgType) && authopts.UseAzureEntraSDK {
-		entraSDKEnv, err := authopts.Azure.EntraSDKEnvVars()
+		entraSDKEnv, err := entraSDKEnvVars(authopts.Azure)
 		if err != nil {
 			return nil, err
 		}

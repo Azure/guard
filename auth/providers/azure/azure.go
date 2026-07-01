@@ -69,7 +69,7 @@ type claims map[string]interface{}
 type Authenticator struct {
 	Options
 	graphClient      *graph.UserInfo
-	verifier         AccessTokenVerifier
+	verifier         accessTokenVerifier
 	popTokenVerifier *PoPTokenVerifier
 }
 
@@ -177,7 +177,7 @@ func New(ctx context.Context, opts Options) (auth.Interface, error) {
 	return c, nil
 }
 
-func newAccessTokenVerifier(issuerURL string, opts Options) (AccessTokenVerifier, error) {
+func newAccessTokenVerifier(issuerURL string, opts Options) (accessTokenVerifier, error) {
 	if opts.EntraSDKURL != "" {
 		return newEntraSDKTokenVerifier(opts.EntraSDKURL, opts.ClientID, opts.VerifyClientID, opts.HttpClientRetryCount)
 	}
@@ -187,7 +187,7 @@ func newAccessTokenVerifier(issuerURL string, opts Options) (AccessTokenVerifier
 		return nil, errors.Wrap(err, "failed to create provider for azure")
 	}
 
-	return &OIDCAccessTokenVerifier{
+	return &oidcAccessTokenVerifier{
 		verifier: provider.Verifier(&oidc.Config{SkipClientIDCheck: !opts.VerifyClientID, ClientID: opts.ClientID}),
 	}, nil
 }

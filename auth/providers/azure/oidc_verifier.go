@@ -24,15 +24,15 @@ import (
 )
 
 var (
-	_ AccessTokenVerifier = (*OIDCAccessTokenVerifier)(nil)
-	_ VerifiedAccessToken = (*oidcVerifiedAccessToken)(nil)
+	_ accessTokenVerifier = (*oidcAccessTokenVerifier)(nil)
+	_ verifiedAccessToken = (*oidcVerifiedAccessToken)(nil)
 )
 
-type OIDCAccessTokenVerifier struct {
+type oidcAccessTokenVerifier struct {
 	verifier *oidc.IDTokenVerifier
 }
 
-func (o *OIDCAccessTokenVerifier) Verify(ctx context.Context, rawAccessToken string) (VerifiedAccessToken, error) {
+func (o *oidcAccessTokenVerifier) Verify(ctx context.Context, rawAccessToken string) (verifiedAccessToken, error) {
 	token, err := o.verifier.Verify(ctx, rawAccessToken)
 	if err != nil {
 		return nil, err

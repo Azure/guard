@@ -134,7 +134,7 @@ func clientSetup(clientID, clientSecret, tenantID, serverUrl string, useGroupUID
 		return nil, fmt.Errorf("failed to create provider for azure. Reason: %v", err)
 	}
 
-	c.verifier = &OIDCAccessTokenVerifier{verifier: p.Verifier(&oidc.Config{
+	c.verifier = &oidcAccessTokenVerifier{verifier: p.Verifier(&oidc.Config{
 		SkipClientIDCheck: !verifyClientID,
 		SkipExpiryCheck:   true,
 		ClientID:          clientID,
@@ -726,7 +726,7 @@ func TestNewAccessTokenVerifier(t *testing.T) {
 	t.Run("selects Entra SDK verifier when URL is provided", func(t *testing.T) {
 		verifier, err := newAccessTokenVerifier("https://issuer.example.com", Options{EntraSDKURL: "http://localhost:8080"})
 		assert.NoError(t, err)
-		assert.IsType(t, &EntraSDKTokenVerifier{}, verifier)
+		assert.IsType(t, &entraSDKTokenVerifier{}, verifier)
 	})
 
 	t.Run("returns error when Entra SDK URL includes a non-root path", func(t *testing.T) {
@@ -756,7 +756,7 @@ func TestNewAccessTokenVerifier(t *testing.T) {
 
 		verifier, err := newAccessTokenVerifier(srv.URL, Options{ClientID: "client_id", VerifyClientID: true, HttpClientRetryCount: httpClientRetryCount})
 		assert.NoError(t, err)
-		assert.IsType(t, &OIDCAccessTokenVerifier{}, verifier)
+		assert.IsType(t, &oidcAccessTokenVerifier{}, verifier)
 	})
 }
 

@@ -22,6 +22,7 @@ import (
 	"net"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"go.kubeguard.dev/guard/auth/providers"
@@ -34,6 +35,7 @@ import (
 	"go.kubeguard.dev/guard/installer"
 	"go.kubeguard.dev/guard/test/e2e/framework"
 
+	autorestazure "github.com/Azure/go-autorest/autorest/azure"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/spf13/afero"
@@ -259,9 +261,20 @@ var _ = Describe("Installer test", func() {
 					return fmt.Errorf("expected 4 Entra SDK env vars, got %d", len(entraContainer.Env))
 				}
 
-				expectedEnv, err := expectedAzureOpts.EntraSDKEnvVars()
-				if err != nil {
-					return err
+				aadInstance := autorestazure.PublicCloud.ActiveDirectoryEndpoint
+				if expectedAzureOpts.Environment != "" {
+					resolvedEnv, err := autorestazure.EnvironmentFromName(strings.TrimSpace(expectedAzureOpts.Environment))
+					if err != nil {
+						return err
+					}
+					aadInstance = resolvedEnv.ActiveDirectoryEndpoint
+				}
+
+				expectedEnv := []core.EnvVar{
+					{Name: "AzureAd__Instance", Value: aadInstance},
+					{Name: "AzureAd__TenantId", Value: expectedAzureOpts.TenantID},
+					{Name: "AzureAd__ClientId", Value: expectedAzureOpts.ClientID},
+					{Name: "AzureAd__Audience", Value: expectedAzureOpts.ClientID},
 				}
 				for i := range expectedEnv {
 					if entraContainer.Env[i] != expectedEnv[i] {
