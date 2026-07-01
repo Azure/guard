@@ -25,8 +25,9 @@ import (
 )
 
 const (
-	empty    = ""
-	nonempty = "non-empty"
+	empty                               = ""
+	nonempty                            = "non-empty"
+	localEntraAuthSidecarServiceBaseURL = "http://localhost:8080"
 )
 
 type optionFunc func(o Options) Options
@@ -121,6 +122,44 @@ var validationErrorData = []struct {
 		errors.New("azure.skip-group-membership-resolution cannot be false when passthrough azure.auth-mode is used"),
 		false,
 	},
+	{
+		"azure.entra-auth-sidecar-service-url must be a valid URL",
+		func(o Options) Options {
+			o.EntraAuthSidecarServiceURL = "://bad-url"
+			return o
+		},
+		errors.New("azure.entra-auth-sidecar-service-url: invalid Entra SDK endpoint: parse \"://bad-url\": missing protocol scheme"),
+		false,
+	},
+	{
+		"azure.entra-auth-sidecar-service-url must be a base URL",
+		func(o Options) Options {
+			o.EntraAuthSidecarServiceURL = localEntraAuthSidecarServiceBaseURL + "/Validate"
+			return o
+		},
+		errors.New("azure.entra-auth-sidecar-service-url: Entra SDK endpoint must be a base URL"),
+		false,
+	},
+	{
+		"azure.client-id is required with Entra SDK URL",
+		func(o Options) Options {
+			o.EntraAuthSidecarServiceURL = localEntraAuthSidecarServiceBaseURL
+			o.ClientID = empty
+			return o
+		},
+		errors.New("azure.client-id must be non-empty when Entra SDK is enabled"),
+		false,
+	},
+	{
+		"azure.environment must resolve for Entra SDK",
+		func(o Options) Options {
+			o.EntraAuthSidecarServiceURL = localEntraAuthSidecarServiceBaseURL
+			o.Environment = "definitely-not-a-real-cloud"
+			return o
+		},
+		errors.New("failed to resolve Entra SDK Azure AD instance: autorest/azure: There is no cloud environment matching the name \"DEFINITELY-NOT-A-REAL-CLOUD\""),
+		false,
+	},
 }
 
 func getNonEmptyOptions() Options {
@@ -169,6 +208,15 @@ func TestOptionsValidate(t *testing.T) {
 		{
 			"validation passed",
 			getNonEmptyOptions(),
+			nil,
+		},
+		{
+			"validation passed with Entra SDK URL",
+			func() Options {
+				o := getNonEmptyOptions()
+				o.EntraAuthSidecarServiceURL = localEntraAuthSidecarServiceBaseURL
+				return o
+			}(),
 			nil,
 		},
 	}

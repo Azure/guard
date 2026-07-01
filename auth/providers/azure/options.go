@@ -56,6 +56,7 @@ type Options struct {
 	ResourceId                               string
 	AzureRegion                              string
 	HttpClientRetryCount                     int
+	EntraAuthSidecarServiceURL               string
 }
 
 func NewOptions() Options {
@@ -83,6 +84,7 @@ func (o *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&o.ResourceId, "azure.auth-resource-id", "", "azure cluster resource id (//subscription/<subName>/resourcegroups/<RGname>/providers/Microsoft.Kubernetes/connectedClusters/<clustername> for connectedk8s) used for making getMemberGroups to ARC OBO service")
 	fs.StringVar(&o.AzureRegion, "azure.region", "", "region where cluster is deployed")
 	fs.IntVar(&o.HttpClientRetryCount, "azure.http-client-retry-count", 2, "number of retries for retryablehttp client")
+	fs.StringVar(&o.EntraAuthSidecarServiceURL, "azure.entra-auth-sidecar-service-url", "", "base URL of the Entra Auth SDK sidecar service used for validating access tokens")
 }
 
 func (o *Options) Validate() []error {
@@ -142,7 +144,31 @@ func (o *Options) Validate() []error {
 	if o.EnablePOP && o.POPTokenHostname == "" {
 		errs = append(errs, errors.New("azure.pop-hostname must be non-empty when pop token is enabled"))
 	}
+	if o.EntraAuthSidecarServiceURL != "" {
+		if _, err := parseEntraSDKBaseURL(o.EntraAuthSidecarServiceURL); err != nil {
+			errs = append(errs, errors.Wrap(err, "azure.entra-auth-sidecar-service-url"))
+		}
+
+		if err := o.validateEntraSDKConfig(); err != nil {
+			errs = append(errs, err)
+		}
+	}
 	return errs
+}
+
+func (o Options) validateEntraSDKConfig() error {
+	if o.ClientID == "" {
+		return errors.New("azure.client-id must be non-empty when Entra SDK is enabled")
+	}
+	if o.TenantID == "" {
+		return errors.New("azure.tenant-id must be non-empty when Entra SDK is enabled")
+	}
+
+	if _, err := resolveAzureEnvironment(o.Environment); err != nil {
+		return errors.Wrap(err, "failed to resolve Entra SDK Azure AD instance")
+	}
+
+	return nil
 }
 
 func (o Options) Apply(d *apps.Deployment) (extraObjs []runtime.Object, err error) {
@@ -203,14 +229,10 @@ func (o Options) Apply(d *apps.Deployment) (extraObjs []runtime.Object, err erro
 		args = append(args, fmt.Sprintf("--azure.tenant-id=%s", o.TenantID))
 	}
 
-	switch o.AuthMode {
-	case AKSAuthMode:
-		fallthrough
-	case OBOAuthMode:
-		fallthrough
-	case ClientCredentialAuthMode:
-		args = append(args, fmt.Sprintf("--azure.auth-mode=%s", o.AuthMode))
-	default:
+	authMode := strings.ToLower(strings.TrimSpace(o.AuthMode))
+	if authMode != "" {
+		args = append(args, fmt.Sprintf("--azure.auth-mode=%s", authMode))
+	} else {
 		args = append(args, fmt.Sprintf("--azure.auth-mode=%s", ClientCredentialAuthMode))
 	}
 
@@ -225,6 +247,10 @@ func (o Options) Apply(d *apps.Deployment) (extraObjs []runtime.Object, err erro
 	args = append(args, fmt.Sprintf("--azure.verify-clientID=%t", o.VerifyClientID))
 
 	args = append(args, fmt.Sprintf("--azure.http-client-retry-count=%d", o.HttpClientRetryCount))
+
+	if o.EntraAuthSidecarServiceURL != "" {
+		args = append(args, fmt.Sprintf("--azure.entra-auth-sidecar-service-url=%s", o.EntraAuthSidecarServiceURL))
+	}
 
 	container.Args = args
 	d.Spec.Template.Spec.Containers[0] = container
