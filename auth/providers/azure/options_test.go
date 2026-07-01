@@ -25,9 +25,9 @@ import (
 )
 
 const (
-	empty                = ""
-	nonempty             = "non-empty"
-	localEntraSDKBaseURL = "http://localhost:8080"
+	empty                               = ""
+	nonempty                            = "non-empty"
+	localEntraAuthSidecarServiceBaseURL = "http://localhost:8080"
 )
 
 type optionFunc func(o Options) Options
@@ -123,27 +123,27 @@ var validationErrorData = []struct {
 		false,
 	},
 	{
-		"azure.entra-sdk-url must be a valid URL",
+		"azure.entra-auth-sidecar-service-url must be a valid URL",
 		func(o Options) Options {
-			o.EntraSDKURL = "://bad-url"
+			o.EntraAuthSidecarServiceURL = "://bad-url"
 			return o
 		},
-		errors.New("azure.entra-sdk-url: invalid Entra SDK endpoint: parse \"://bad-url\": missing protocol scheme"),
+		errors.New("azure.entra-auth-sidecar-service-url: invalid Entra SDK endpoint: parse \"://bad-url\": missing protocol scheme"),
 		false,
 	},
 	{
-		"azure.entra-sdk-url must be a base URL",
+		"azure.entra-auth-sidecar-service-url must be a base URL",
 		func(o Options) Options {
-			o.EntraSDKURL = localEntraSDKBaseURL + "/Validate"
+			o.EntraAuthSidecarServiceURL = localEntraAuthSidecarServiceBaseURL + "/Validate"
 			return o
 		},
-		errors.New("azure.entra-sdk-url: Entra SDK endpoint must be a base URL"),
+		errors.New("azure.entra-auth-sidecar-service-url: Entra SDK endpoint must be a base URL"),
 		false,
 	},
 	{
 		"azure.client-id is required with Entra SDK URL",
 		func(o Options) Options {
-			o.EntraSDKURL = localEntraSDKBaseURL
+			o.EntraAuthSidecarServiceURL = localEntraAuthSidecarServiceBaseURL
 			o.ClientID = empty
 			return o
 		},
@@ -153,7 +153,7 @@ var validationErrorData = []struct {
 	{
 		"azure.environment must resolve for Entra SDK",
 		func(o Options) Options {
-			o.EntraSDKURL = localEntraSDKBaseURL
+			o.EntraAuthSidecarServiceURL = localEntraAuthSidecarServiceBaseURL
 			o.Environment = "definitely-not-a-real-cloud"
 			return o
 		},
@@ -214,7 +214,7 @@ func TestOptionsValidate(t *testing.T) {
 			"validation passed with Entra SDK URL",
 			func() Options {
 				o := getNonEmptyOptions()
-				o.EntraSDKURL = localEntraSDKBaseURL
+				o.EntraAuthSidecarServiceURL = localEntraAuthSidecarServiceBaseURL
 				return o
 			}(),
 			nil,

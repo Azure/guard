@@ -178,8 +178,8 @@ func New(ctx context.Context, opts Options) (auth.Interface, error) {
 }
 
 func newAccessTokenVerifier(issuerURL string, opts Options) (accessTokenVerifier, error) {
-	if opts.EntraSDKURL != "" {
-		return newEntraSDKTokenVerifier(opts.EntraSDKURL, opts.ClientID, opts.VerifyClientID, opts.HttpClientRetryCount)
+	if opts.EntraAuthSidecarServiceURL != "" {
+		return newEntraSDKTokenVerifier(opts.EntraAuthSidecarServiceURL, opts.ClientID, opts.VerifyClientID, opts.HttpClientRetryCount)
 	}
 
 	provider, err := getOIDCIssuerProvider(issuerURL, opts.HttpClientRetryCount)

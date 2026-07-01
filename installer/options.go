@@ -131,7 +131,7 @@ func (o *AuthOptions) Validate() []error {
 		azureOpts := o.Azure
 		if o.UseAzureEntraSDK {
 			// The SDK URL will be generated
-			azureOpts.EntraSDKURL = ""
+			azureOpts.EntraAuthSidecarServiceURL = ""
 		}
 		errs = append(errs, azureOpts.Validate()...)
 		if o.UseAzureEntraSDK {

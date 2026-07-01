@@ -246,7 +246,7 @@ var _ = Describe("Installer test", func() {
 				if guardContainer.Name != "guard" {
 					return fmt.Errorf("expected first container to be guard, got %q", guardContainer.Name)
 				}
-				if !containsArg(guardContainer.Args, "--azure.entra-sdk-url=http://127.0.0.1:8080") {
+				if !containsArg(guardContainer.Args, "--azure.entra-auth-sidecar-service-url=http://127.0.0.1:8080") {
 					return fmt.Errorf("expected guard to use the localhost Entra SDK URL")
 				}
 

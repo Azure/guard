@@ -318,7 +318,7 @@ func newDeployment(authopts AuthOptions, authzopts AuthzOptions) (objects []runt
 	if authopts.AuthProvider.Has(azure.OrgType) {
 		azureOpts := authopts.Azure
 		if authopts.UseAzureEntraSDK {
-			azureOpts.EntraSDKURL = fmt.Sprintf("http://127.0.0.1:%d", azureEntraSDKPort)
+			azureOpts.EntraAuthSidecarServiceURL = fmt.Sprintf("http://127.0.0.1:%d", azureEntraSDKPort)
 		}
 		if extras, err := azureOpts.Apply(d); err != nil {
 			return nil, err

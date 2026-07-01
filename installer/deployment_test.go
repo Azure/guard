@@ -58,7 +58,7 @@ func TestAuthOptionsValidateWithAzureEntraSDK(t *testing.T) {
 	t.Run("installer Entra SDK flag overrides azure Entra SDK URL validation", func(t *testing.T) {
 		authopts := NewAuthOptions()
 		authopts.AuthProvider = providers.AuthProviders{Providers: []string{azure.OrgType}}
-		authopts.Azure = azure.Options{ClientID: "client-id", ClientSecret: "client-secret", TenantID: "tenant-id", AuthMode: azure.ClientCredentialAuthMode, EntraSDKURL: "://bad-url"}
+		authopts.Azure = azure.Options{ClientID: "client-id", ClientSecret: "client-secret", TenantID: "tenant-id", AuthMode: azure.ClientCredentialAuthMode, EntraAuthSidecarServiceURL: "://bad-url"}
 		authopts.UseAzureEntraSDK = true
 
 		assert.NoError(t, aggregateErrors(authopts.Validate()))
@@ -85,7 +85,7 @@ func TestNewDeploymentWithAzureEntraSDK(t *testing.T) {
 			entraSDKContainer := deployment.Spec.Template.Spec.Containers[1]
 
 			assert.Equal(t, "guard", guardContainer.Name)
-			assert.Contains(t, guardContainer.Args, "--azure.entra-sdk-url=http://127.0.0.1:8080")
+			assert.Contains(t, guardContainer.Args, "--azure.entra-auth-sidecar-service-url=http://127.0.0.1:8080")
 
 			assert.Equal(t, azureEntraSDKContainerName, entraSDKContainer.Name)
 			assert.Equal(t, DefaultAzureEntraSDKImage, entraSDKContainer.Image)
@@ -99,7 +99,7 @@ func TestNewDeploymentWithAzureEntraSDK(t *testing.T) {
 	t.Run("installer flag overrides explicit azure Entra SDK URL", func(t *testing.T) {
 		authopts := newAzureAuthOptions(t)
 		authopts.UseAzureEntraSDK = true
-		authopts.Azure.EntraSDKURL = "http://external-sdk.example.com"
+		authopts.Azure.EntraAuthSidecarServiceURL = "http://external-sdk.example.com"
 
 		objects, err := newDeployment(authopts, AuthzOptions{})
 		if !assert.NoError(t, err) {
@@ -112,8 +112,8 @@ func TestNewDeploymentWithAzureEntraSDK(t *testing.T) {
 		}
 
 		guardContainer := deployment.Spec.Template.Spec.Containers[0]
-		assert.Contains(t, guardContainer.Args, "--azure.entra-sdk-url=http://127.0.0.1:8080")
-		assert.NotContains(t, guardContainer.Args, "--azure.entra-sdk-url=http://external-sdk.example.com")
+		assert.Contains(t, guardContainer.Args, "--azure.entra-auth-sidecar-service-url=http://127.0.0.1:8080")
+		assert.NotContains(t, guardContainer.Args, "--azure.entra-auth-sidecar-service-url=http://external-sdk.example.com")
 	})
 
 	t.Run("uses custom Entra SDK image", func(t *testing.T) {

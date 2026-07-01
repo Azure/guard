@@ -151,14 +151,14 @@ func clientSetup(clientID, clientSecret, tenantID, serverUrl string, useGroupUID
 func entraClientSetup(clientID, clientSecret, tenantID, graphServerURL, sdkURL string, useGroupUID, verifyClientID bool) (*Authenticator, error) {
 	c := &Authenticator{
 		Options: Options{
-			ClientID:             clientID,
-			ClientSecret:         clientSecret,
-			TenantID:             tenantID,
-			UseGroupUID:          useGroupUID,
-			VerifyClientID:       verifyClientID,
-			EntraSDKURL:          sdkURL,
-			AzureRegion:          "eastus",
-			HttpClientRetryCount: httpClientRetryCount,
+			ClientID:                   clientID,
+			ClientSecret:               clientSecret,
+			TenantID:                   tenantID,
+			UseGroupUID:                useGroupUID,
+			VerifyClientID:             verifyClientID,
+			EntraAuthSidecarServiceURL: sdkURL,
+			AzureRegion:                "eastus",
+			HttpClientRetryCount:       httpClientRetryCount,
 		},
 	}
 	verifier, err := newEntraSDKTokenVerifier(sdkURL, clientID, verifyClientID, httpClientRetryCount)
@@ -724,13 +724,13 @@ func TestGetMetadata(t *testing.T) {
 
 func TestNewAccessTokenVerifier(t *testing.T) {
 	t.Run("selects Entra SDK verifier when URL is provided", func(t *testing.T) {
-		verifier, err := newAccessTokenVerifier("https://issuer.example.com", Options{EntraSDKURL: "http://localhost:8080"})
+		verifier, err := newAccessTokenVerifier("https://issuer.example.com", Options{EntraAuthSidecarServiceURL: "http://localhost:8080"})
 		assert.NoError(t, err)
 		assert.IsType(t, &entraSDKTokenVerifier{}, verifier)
 	})
 
 	t.Run("returns error when Entra SDK URL includes a non-root path", func(t *testing.T) {
-		verifier, err := newAccessTokenVerifier("https://issuer.example.com", Options{EntraSDKURL: "http://localhost:8080/Validate"})
+		verifier, err := newAccessTokenVerifier("https://issuer.example.com", Options{EntraAuthSidecarServiceURL: "http://localhost:8080/Validate"})
 		assert.Nil(t, verifier)
 		assert.EqualError(t, err, "Entra SDK endpoint must be a base URL")
 	})
