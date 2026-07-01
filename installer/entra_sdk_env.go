@@ -17,9 +17,10 @@ limitations under the License.
 package installer
 
 import (
+	"go.kubeguard.dev/guard/auth/providers/azure"
+
 	autorestazure "github.com/Azure/go-autorest/autorest/azure"
 	"github.com/pkg/errors"
-	"go.kubeguard.dev/guard/auth/providers/azure"
 	core "k8s.io/api/core/v1"
 )
 
