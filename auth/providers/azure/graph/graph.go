@@ -108,7 +108,6 @@ func (u *UserInfo) getGroupIDs(ctx context.Context, userPrincipal string) ([]str
 	userSearchURL := *u.apiURL
 	// Append the path for the member list
 	userSearchURL.Path = path.Join(userSearchURL.Path, fmt.Sprintf("/users/%s/getMemberGroups", userPrincipal))
-	klog.V(5).Infof("Getting group IDs for userPrincipal: %s with request URL: %s", userPrincipal, userSearchURL.String())
 
 	// The body being sent makes sure that all groups are returned, not just security groups
 	req, err := http.NewRequest(http.MethodPost, userSearchURL.String(), strings.NewReader(`{"securityEnabledOnly": false}`))
@@ -379,8 +378,6 @@ func (u *UserInfo) GetGroups(ctx context.Context, userPrincipal string, token st
 	}
 
 	// Get the group IDs for the user
-	fmt.Sprintf("User token: %s", token)
-	klog.V(5).Infof("Acquired user token %s", token)
 	groupIDs, err := u.getGroupIDs(ctx, userPrincipal)
 	if err != nil {
 		return nil, err
@@ -419,20 +416,16 @@ func (u *UserInfo) GetGroups(ctx context.Context, userPrincipal string, token st
 // This method acquires an AAD Graph-scoped token via the OBO server, then calls
 // /{tenantID}/servicePrincipals/{oid}/getMemberObjects.
 func (u *UserInfo) GetSPMemberObjects(ctx context.Context, spOID string, token string) ([]string, error) {
-	klog.V(5).Infof("User API: %s", u.apiURL.String())
+	// Build the request to AAD Graph getMemberObjects.
+	spSearchURL := *u.apiURL
+	spSearchURL.Path = path.Join(spSearchURL.Path, fmt.Sprintf("/servicePrincipals/%s/getMemberObjects", spOID))
 
-	// Build the request to AAD Graph getMemberObjects
-	fmt.Sprintf("sp token: %s", token)
-	klog.V(5).Infof("Acquired SP token %s", token)
-	endpoint := fmt.Sprintf("https://graph.microsoft.com/v1.0/servicePrincipals/%s/getMemberObjects", spOID)
-
-	body := strings.NewReader(`{"securityEnabledOnly": false}`)
-	req, err := http.NewRequest(http.MethodPost, endpoint, body)
+	req, err := http.NewRequest(http.MethodPost, spSearchURL.String(), strings.NewReader(`{"securityEnabledOnly": false}`))
 	if err != nil {
 		return nil, errors.Wrap(err, "error creating SP getMemberObjects request")
 	}
-
 	req.Header = u.headers
+
 	resp, err := u.client.Do(req.WithContext(ctx))
 	if err != nil {
 		return nil, errors.Wrap(err, "error calling SP getMemberObjects")
@@ -443,7 +436,7 @@ func (u *UserInfo) GetSPMemberObjects(ctx context.Context, spOID string, token s
 
 	if resp.StatusCode != http.StatusOK {
 		data, _ := io.ReadAll(resp.Body)
-		return nil, errors.Errorf("request %s failed with status code: %d and response: %s", endpoint, resp.StatusCode, string(data))
+		return nil, errors.Errorf("request %s failed with status code: %d and response: %s", spSearchURL.String(), resp.StatusCode, string(data))
 	}
 
 	objects := ObjectList{}
@@ -452,7 +445,6 @@ func (u *UserInfo) GetSPMemberObjects(ctx context.Context, spOID string, token s
 		return nil, errors.Wrapf(err, "failed to decode SP getMemberObjects response")
 	}
 
-	klog.V(5).Infof("SP getMemberObjects returned %d objects for %s", len(objects.Value), spOID)
 	return objects.Value, nil
 }
 
