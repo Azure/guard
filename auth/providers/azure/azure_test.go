@@ -457,9 +457,6 @@ func TestCheckAzureAuthenticationSPNWithOverage(t *testing.T) {
 	}
 
 	t.Run("SPN token with overage claim should proceed to SP overage resolution", func(t *testing.T) {
-		// SP overage resolution requires AKS mode with tokenURL set.
-		// With TestUserInfo (no tokenURL/tenantID), it will fail at token acquisition,
-		// NOT with the old "service principal...not supported" blockade.
 		srv, client := getServerAndClient(t, signKey, loginResp, 3, true, false, ClientCredentialAuthMode)
 		client.Options.ResolveGroupMembershipOnlyOnOverageClaim = true
 		client.Options.UseGroupUID = true
@@ -471,8 +468,6 @@ func TestCheckAzureAuthenticationSPNWithOverage(t *testing.T) {
 		}
 
 		resp, err := client.Check(ctx, token)
-		// Should fail at AAD Graph token acquisition (no tokenURL configured),
-		// NOT at the old SP blockade
 		assert.NotNil(t, err)
 		assert.Nil(t, resp)
 		assert.Contains(t, err.Error(), "failed to get groups")
