@@ -29,7 +29,6 @@ import (
 	"sync"
 	"time"
 
-	errutils "go.kubeguard.dev/guard/util/error"
 	"go.kubeguard.dev/guard/util/httpclient"
 
 	"github.com/golang-jwt/jwt"
@@ -93,8 +92,7 @@ type UserInfo struct {
 	useGroupUID   bool
 
 	tokenProvider TokenProvider
-	// tokenURL is the OBO endpoint used for acquiring tokens (AKS mode)
-	tokenURL   string
+
 	authMode   string
 	tenantID   string
 	resourceID string
@@ -410,13 +408,13 @@ func (u *UserInfo) GetGroups(ctx context.Context, userPrincipal string, token st
 	return groupNames, nil
 }
 
-// GetSPMemberObjects resolves group membership for service principals using
-// AAD Graph (graph.windows.net). SP overage tokens reference AAD Graph in their
-// _claim_sources endpoint, and MS Graph does not yet support the SP overage flow.
-// This method acquires an AAD Graph-scoped token via the OBO server, then calls
-// /{tenantID}/servicePrincipals/{oid}/getMemberObjects.
-func (u *UserInfo) GetSPMemberObjects(ctx context.Context, spOID string, token string) ([]string, error) {
-	// Build the request to AAD Graph getMemberObjects.
+// GetSPMemberObjects resolves group membership for a service principal by
+// calling MS Graph /servicePrincipals/{oid}/getMemberObjects. Users are resolved
+// via /users/{upn}/getMemberGroups (see getGroupIDs); service principals require
+// the servicePrincipals resource, which is why this is a separate method.
+// Both share the same MS Graph base URL and the OBO token in u.headers.
+func (u *UserInfo) GetSPMemberObjects(ctx context.Context, spOID string) ([]string, error) {
+	// Shallow copy of the base API URL, then append the SP member objects path.
 	spSearchURL := *u.apiURL
 	spSearchURL.Path = path.Join(spSearchURL.Path, fmt.Sprintf("/servicePrincipals/%s/getMemberObjects", spOID))
 
@@ -509,13 +507,7 @@ func NewWithAKS(tokenURL, tenantID, msgraphHost string) (*UserInfo, error) {
 
 	tokenProvider := NewAKSTokenProvider(tokenURL, tenantID)
 
-	userInfo, err := newUserInfo(tokenProvider, graphURL, true)
-	if err != nil {
-		return nil, err
-	}
-	userInfo.tenantID = tenantID
-	userInfo.tokenURL = tokenURL
-	return userInfo, nil
+	return newUserInfo(tokenProvider, graphURL, true)
 }
 
 // NewWithARC returns a new UserInfo object used in ARC

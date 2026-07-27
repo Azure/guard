@@ -277,15 +277,18 @@ func (s Authenticator) Check(ctx context.Context, token string) (*authv1.UserInf
 		}
 	}
 	if !s.Options.SkipGroupMembershipResolution {
+		if err := s.graphClient.RefreshToken(ctx, token); err != nil {
+			return nil, err
+		}
 		if isAppToken(claims) {
-			if err := s.graphClient.RefreshToken(ctx, token); err != nil {
-				return nil, err
+			// App tokens carry no upn, and service principals are resolved by
+			// object ID against the /servicePrincipals resource.
+			spOID, oidErr := claims.string(azureObjectIDClaim)
+			if oidErr != nil {
+				return nil, errors.Wrap(oidErr, "unable to get oid claim for service principal")
 			}
-			resp.Groups, err = s.graphClient.GetSPMemberObjects(ctx, resp.Username, token)
+			resp.Groups, err = s.graphClient.GetSPMemberObjects(ctx, spOID)
 		} else {
-			if err := s.graphClient.RefreshToken(ctx, token); err != nil {
-				return nil, err
-			}
 			resp.Groups, err = s.graphClient.GetGroups(ctx, resp.Username, token)
 		}
 		if err != nil {
