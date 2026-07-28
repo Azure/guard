@@ -336,7 +336,8 @@ func getDataActions(ctx context.Context, subRevReq *authzv1.SubjectAccessReviewS
 				return nil, errutils.WithCode(
 					fmt.Errorf("wildcard resource/verb/group check unavailable: operations map not populated (Group: %s, Resource: %s, Verb: %s)",
 						subRevReq.ResourceAttributes.Group, subRevReq.ResourceAttributes.Resource, subRevReq.ResourceAttributes.Verb),
-					http.StatusBadRequest)
+					http.StatusBadRequest,
+				)
 			}
 
 			authInfoList, err = getAuthInfoListForWildcard(ctx, subRevReq, storedOperationsMap, clusterType, isCustomerResourceTypeCheckAvailable, allowSubresourceTypeCheck)
@@ -773,7 +774,8 @@ func ConvertCheckAccessResponse(ctx context.Context, username string, body []byt
 		verdict = fmt.Sprintf(AccessAllowedVerboseVerdict, response[0].AzureRoleAssignment.Id, response[0].AzureRoleAssignment.RoleDefinitionId, username)
 
 		// Log role definition ID to help identify if exec/other actions are authorized via built-in or custom roles
-		log.V(5).Info("Access allowed via role assignment",
+		log.V(5).Info(
+			"Access allowed via role assignment",
 			"roleAssignmentId", response[0].AzureRoleAssignment.Id,
 			"roleDefinitionId", response[0].AzureRoleAssignment.RoleDefinitionId,
 			"user", username,
