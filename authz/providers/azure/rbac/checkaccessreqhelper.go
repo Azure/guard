@@ -49,7 +49,13 @@ const (
 	NonAADUserNotAllowedVerdict = "Access denied by Azure RBAC for non AAD users. Configure --azure.skip-authz-for-non-aad-users to enable access. If you are an AAD user, please set Extra:oid parameter for impersonated user in the kubeconfig."
 	CheckAccessErrorVerdict     = "Access denied due to Azure RBAC check failure. Please retry later."
 	PodsResource                = "pods"
+	ServicesResource            = "services"
+	NodesResource               = "nodes"
 	CustomResources             = "customresources"
+	ProxySubresource            = "proxy"
+	AttachSubresource           = "attach"
+	PortForwardSubresource      = "portforward"
+	ExecSubresource             = "exec"
 	ReadVerb                    = "read"
 	WriteVerb                   = "write"
 	DeleteVerb                  = "delete"
@@ -248,16 +254,40 @@ func getActionName(verb string) string {
 	}
 }
 
+// securitySensitiveSubresources lists resource/subresource pairs that upstream
+// Kubernetes treats as distinct authorization targets. For these, the
+// subresource is preserved in the DataAction string
+// ("<resource>/<subresource>/action") rather than collapsed into the base
+// resource action, so the authorization decision keeps the same granularity as
+// the upstream Kubernetes RBAC model (see the bootstrappolicy view/edit
+// ClusterRoles).
+//
+// The pods exec/attach/portforward/proxy, services/proxy and nodes/proxy
+// subresources are granted separately from base read/write in the upstream
+// roles, so they are mapped to their own DataAction rather than to
+// <resource>/read or <resource>/write.
+var securitySensitiveSubresources = map[string]map[string]struct{}{
+	PodsResource: {
+		ExecSubresource:        {},
+		AttachSubresource:      {},
+		PortForwardSubresource: {},
+		ProxySubresource:       {},
+	},
+	ServicesResource: {
+		ProxySubresource: {},
+	},
+	NodesResource: {
+		ProxySubresource: {},
+	},
+}
+
 func getResourceAndAction(resource string, subResource string, verb string) string {
-	var action string
-
-	if resource == PodsResource && subResource == "exec" {
-		action = path.Join(resource, subResource, "action")
-	} else {
-		action = path.Join(resource, getActionName(verb))
+	if subs, ok := securitySensitiveSubresources[resource]; ok && subResource != "" {
+		if _, sensitive := subs[subResource]; sensitive {
+			return path.Join(resource, subResource, "action")
+		}
 	}
-
-	return action
+	return path.Join(resource, getActionName(verb))
 }
 
 func getDataActions(ctx context.Context, subRevReq *authzv1.SubjectAccessReviewSpec, clusterType string, allowCustomResourceTypeCheck bool, allowSubresourceTypeCheck bool) ([]azureutils.AuthorizationActionInfo, error) {
