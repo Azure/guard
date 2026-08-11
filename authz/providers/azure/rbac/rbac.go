@@ -353,12 +353,40 @@ func (a *AccessInfo) SetResultInCache(ctx context.Context, request *authzv1.Subj
 	return store.Set(key, result)
 }
 
-func (a *AccessInfo) AllowNonResPathDiscoveryAccess(request *authzv1.SubjectAccessReviewSpec) bool {
-	if request.NonResourceAttributes != nil && a.allowNonResDiscoveryPathAccess && strings.EqualFold(request.NonResourceAttributes.Verb, "get") {
-		path := strings.ToLower(request.NonResourceAttributes.Path)
-		if strings.HasPrefix(path, "/api") || strings.HasPrefix(path, "/openapi") || strings.HasPrefix(path, "/version") || strings.HasPrefix(path, "/healthz") {
+// discoveryPathRoots are the non-resource path roots that Guard may authorize
+// for any authenticated user without an Azure RBAC check. A request path counts
+// as discovery only when it equals one of these roots exactly or is nested
+// beneath it on a path-segment boundary (root + "/..."). Loose prefix matching
+// (for example "/apiz" or "/healthzz") must never be treated as discovery.
+var discoveryPathRoots = []string{"/api", "/apis", "/openapi", "/version", "/healthz"}
+
+// isNonResourceDiscoveryPath reports whether the lowercased non-resource path is
+// one of the well-known Kubernetes discovery or health endpoints. It rejects any
+// path containing a ".." traversal segment so a path cannot match on a loose
+// prefix and, once path.Clean normalizes it elsewhere, share the cache key of an
+// unrelated resource request (see getResultCacheKey). Matching on an exact root
+// or a path-segment boundary keeps the discovery exemption scoped to real
+// discovery endpoints (MSRC 132991).
+func isNonResourceDiscoveryPath(lowerPath string) bool {
+	if lowerPath == "" {
+		return false
+	}
+	for _, segment := range strings.Split(lowerPath, "/") {
+		if segment == ".." {
+			return false
+		}
+	}
+	for _, root := range discoveryPathRoots {
+		if lowerPath == root || strings.HasPrefix(lowerPath, root+"/") {
 			return true
 		}
+	}
+	return false
+}
+
+func (a *AccessInfo) AllowNonResPathDiscoveryAccess(request *authzv1.SubjectAccessReviewSpec) bool {
+	if request.NonResourceAttributes != nil && a.allowNonResDiscoveryPathAccess && strings.EqualFold(request.NonResourceAttributes.Verb, "get") {
+		return isNonResourceDiscoveryPath(strings.ToLower(request.NonResourceAttributes.Path))
 	}
 	return false
 }

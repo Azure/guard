@@ -634,6 +634,16 @@ func defaultDir(s string) string {
 	return "-" // invalid for a namespace
 }
 
+// Cache key construction for non-resource requests. cacheKeyFieldSeparator is a
+// NUL byte, which cannot legally appear in a URL path, a Kubernetes verb, or an
+// AAD user name, so it unambiguously separates the fields and guarantees a
+// non-resource key can never equal a resource key (which is "/"-joined and NUL
+// free). nonResourceCacheKeyPrefix names that disjoint namespace.
+const (
+	nonResourceCacheKeyPrefix = "nonresource"
+	cacheKeyFieldSeparator    = "\x00"
+)
+
 func getResultCacheKey(subRevReq *authzv1.SubjectAccessReviewSpec, allowSubresourceTypeCheck bool) string {
 	cacheKey := subRevReq.User
 
@@ -650,7 +660,18 @@ func getResultCacheKey(subRevReq *authzv1.SubjectAccessReviewSpec, allowSubresou
 			}
 		}
 	} else if subRevReq.NonResourceAttributes != nil {
-		cacheKey = path.Join(cacheKey, subRevReq.NonResourceAttributes.Path, getActionName(subRevReq.NonResourceAttributes.Verb))
+		// The non-resource path is fully caller-controlled and may contain ".."
+		// segments. It must NOT flow through path.Join/path.Clean, which would
+		// resolve ".." and let a path (e.g. "/apiz/../-/-/secrets") normalize onto
+		// the cache key of an unrelated resource request, so a decision cached for
+		// one request could be served for a different one (MSRC 132991). Join the
+		// fields with a NUL separator into a namespace disjoint from resource keys.
+		cacheKey = strings.Join([]string{
+			nonResourceCacheKeyPrefix,
+			subRevReq.User,
+			subRevReq.NonResourceAttributes.Path,
+			getActionName(subRevReq.NonResourceAttributes.Verb),
+		}, cacheKeyFieldSeparator)
 	}
 
 	return cacheKey

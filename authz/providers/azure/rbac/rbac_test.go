@@ -1003,3 +1003,62 @@ type capturedCheckAccess struct {
 	resourceID string
 	actions    []azureutils.AuthorizationActionInfo
 }
+
+// Test_AllowNonResPathDiscoveryAccess is the regression test for the discovery
+// half of MSRC 132991. The discovery exemption (which returns ALLOW with no
+// Azure RBAC check) must apply only to the well-known discovery/health endpoints
+// on a path-segment boundary, and must reject loose-prefix look-alikes and any
+// path containing a ".." traversal segment.
+func Test_AllowNonResPathDiscoveryAccess(t *testing.T) {
+	tests := []struct {
+		name           string
+		path           string
+		verb           string
+		allowDiscovery bool
+		nilNonResource bool
+		want           bool
+	}{
+		// Legitimate discovery / health endpoints - allowed.
+		{name: "api root", path: "/api", verb: "get", allowDiscovery: true, want: true},
+		{name: "apis root", path: "/apis", verb: "get", allowDiscovery: true, want: true},
+		{name: "core group version", path: "/api/v1", verb: "get", allowDiscovery: true, want: true},
+		{name: "named group version", path: "/apis/apps/v1", verb: "get", allowDiscovery: true, want: true},
+		{name: "openapi v2", path: "/openapi/v2", verb: "get", allowDiscovery: true, want: true},
+		{name: "openapi v3", path: "/openapi/v3", verb: "get", allowDiscovery: true, want: true},
+		{name: "version", path: "/version", verb: "get", allowDiscovery: true, want: true},
+		{name: "healthz", path: "/healthz", verb: "get", allowDiscovery: true, want: true},
+		{name: "healthz subpath", path: "/healthz/ping", verb: "get", allowDiscovery: true, want: true},
+		{name: "uppercase healthz", path: "/HEALTHZ", verb: "GET", allowDiscovery: true, want: true},
+
+		// Loose-prefix look-alikes - must be rejected (the core defect).
+		{name: "apiz lookalike", path: "/apiz", verb: "get", allowDiscovery: true, want: false},
+		{name: "healthzz lookalike", path: "/healthzz", verb: "get", allowDiscovery: true, want: false},
+		{name: "openapiz lookalike", path: "/openapiz", verb: "get", allowDiscovery: true, want: false},
+		{name: "versionz lookalike", path: "/versionz", verb: "get", allowDiscovery: true, want: false},
+
+		// Path-traversal crafts - must be rejected.
+		{name: "apiz traversal to secrets", path: "/apiz/../-/-/secrets", verb: "get", allowDiscovery: true, want: false},
+		{name: "api traversal to secrets", path: "/api/../-/-/secrets", verb: "get", allowDiscovery: true, want: false},
+		{name: "healthz traversal", path: "/healthz/../-/-/secrets", verb: "get", allowDiscovery: true, want: false},
+
+		// Non-discovery resources and other guards.
+		{name: "unrelated path", path: "/logs", verb: "get", allowDiscovery: true, want: false},
+		{name: "empty path", path: "", verb: "get", allowDiscovery: true, want: false},
+		{name: "non-get verb", path: "/api", verb: "list", allowDiscovery: true, want: false},
+		{name: "discovery disabled", path: "/api", verb: "get", allowDiscovery: false, want: false},
+		{name: "nil non-resource attrs", nilNonResource: true, allowDiscovery: true, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			a := &AccessInfo{allowNonResDiscoveryPathAccess: tt.allowDiscovery}
+			req := &authzv1.SubjectAccessReviewSpec{User: "eve@contoso.com"}
+			if !tt.nilNonResource {
+				req.NonResourceAttributes = &authzv1.NonResourceAttributes{Path: tt.path, Verb: tt.verb}
+			}
+			if got := a.AllowNonResPathDiscoveryAccess(req); got != tt.want {
+				t.Errorf("AllowNonResPathDiscoveryAccess(path=%q, verb=%q) = %v, want %v", tt.path, tt.verb, got, tt.want)
+			}
+		})
+	}
+}

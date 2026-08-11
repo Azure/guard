@@ -1354,7 +1354,7 @@ func Test_getResultCacheKey(t *testing.T) {
 				},
 				allowSubresourceTypeCheck: false,
 			},
-			"charlie@yahoo.com/apis/v1/read",
+			strings.Join([]string{nonResourceCacheKeyPrefix, "charlie@yahoo.com", "/apis/v1", "read"}, cacheKeyFieldSeparator),
 		},
 
 		{
@@ -1366,7 +1366,7 @@ func Test_getResultCacheKey(t *testing.T) {
 				},
 				allowSubresourceTypeCheck: false,
 			},
-			"echo@outlook.com/logs/read",
+			strings.Join([]string{nonResourceCacheKeyPrefix, "echo@outlook.com", "/logs", "read"}, cacheKeyFieldSeparator),
 		},
 
 		{
@@ -1496,6 +1496,53 @@ func Test_getResultCacheKey(t *testing.T) {
 				t.Errorf("getResultCacheKey() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// Test_getResultCacheKey_noResourceNonResourceCollision is the regression test
+// for MSRC 132991. A non-resource path whose ".." segments normalize down to a
+// resource's path (e.g. "/apiz/../-/-/secrets") must NOT produce the same cache
+// key as the corresponding resource request (a cluster-wide list of secrets), so
+// a decision cached for one request is never served for a different one.
+func Test_getResultCacheKey_noResourceNonResourceCollision(t *testing.T) {
+	const user = "eve@contoso.com"
+
+	// getActionName maps get/list/watch all to "read", and the object name and
+	// ResourceRequest flag are not part of the key, so these share one key.
+	resourceVariants := []*authzv1.SubjectAccessReviewSpec{
+		{User: user, ResourceAttributes: &authzv1.ResourceAttributes{Resource: "secrets", Verb: "list"}},
+		{User: user, ResourceAttributes: &authzv1.ResourceAttributes{Resource: "secrets", Verb: "get"}},
+		{User: user, ResourceAttributes: &authzv1.ResourceAttributes{Resource: "secrets", Verb: "watch"}},
+	}
+
+	// Non-resource paths that path.Clean would normalize onto the secrets key.
+	craftedPaths := []string{
+		"/apiz/../-/-/secrets",
+		"/api/../-/-/secrets",
+		"/healthzz/../-/-/secrets",
+		"/openapiz/../-/-/secrets",
+	}
+
+	for _, allowSubresourceTypeCheck := range []bool{false, true} {
+		resourceKeys := make(map[string]struct{})
+		for _, r := range resourceVariants {
+			resourceKeys[getResultCacheKey(r, allowSubresourceTypeCheck)] = struct{}{}
+		}
+
+		for _, p := range craftedPaths {
+			nonRes := &authzv1.SubjectAccessReviewSpec{
+				User:                  user,
+				NonResourceAttributes: &authzv1.NonResourceAttributes{Path: p, Verb: "get"},
+			}
+			got := getResultCacheKey(nonRes, allowSubresourceTypeCheck)
+			if _, collides := resourceKeys[got]; collides {
+				t.Errorf("non-resource path %q (allowSubresourceTypeCheck=%v) collides with a secrets resource cache key: %q",
+					p, allowSubresourceTypeCheck, got)
+			}
+			if !strings.Contains(got, cacheKeyFieldSeparator) {
+				t.Errorf("non-resource cache key %q for path %q must use the NUL field separator", got, p)
+			}
+		}
 	}
 }
 
