@@ -417,6 +417,116 @@ func Test_getDataActions(t *testing.T) {
 			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "fleet/pods/exec/action"}, IsDataAction: true}},
 		},
 
+		// pods/proxy, services/proxy and nodes/proxy must produce a distinct
+		// DataAction so that a GET on the proxy subresource does NOT collapse
+		// onto <resource>/read, keeping the same granularity as the upstream
+		// Kubernetes RBAC model.
+		{
+			"podsProxyGetAKS",
+			args{
+				isWildcardTest: false,
+				subRevReq: &authzv1.SubjectAccessReviewSpec{
+					ResourceAttributes: &authzv1.ResourceAttributes{Group: "", Resource: "pods", Subresource: "proxy", Version: "v1", Name: "test", Verb: "get"},
+				}, clusterType: aksClusterType,
+			},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/pods/proxy/action"}, IsDataAction: true}},
+		},
+
+		{
+			"podsProxyGetFleet",
+			args{
+				isWildcardTest: false,
+				subRevReq: &authzv1.SubjectAccessReviewSpec{
+					ResourceAttributes: &authzv1.ResourceAttributes{Group: "", Resource: "pods", Subresource: "proxy", Version: "v1", Name: "test", Verb: "get"},
+				}, clusterType: "fleet",
+			},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "fleet/pods/proxy/action"}, IsDataAction: true}},
+		},
+
+		// pods/attach and pods/portforward are distinct authorization targets
+		// in upstream Kubernetes (bootstrappolicy edit role) and must map to
+		// their own DataAction rather than collapsing onto pods/read.
+		{
+			"podsAttachGetAKS",
+			args{
+				isWildcardTest: false,
+				subRevReq: &authzv1.SubjectAccessReviewSpec{
+					ResourceAttributes: &authzv1.ResourceAttributes{Group: "", Resource: "pods", Subresource: "attach", Version: "v1", Name: "test", Verb: "get"},
+				}, clusterType: aksClusterType,
+			},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/pods/attach/action"}, IsDataAction: true}},
+		},
+
+		{
+			"podsPortForwardGetAKS",
+			args{
+				isWildcardTest: false,
+				subRevReq: &authzv1.SubjectAccessReviewSpec{
+					ResourceAttributes: &authzv1.ResourceAttributes{Group: "", Resource: "pods", Subresource: "portforward", Version: "v1", Name: "test", Verb: "get"},
+				}, clusterType: aksClusterType,
+			},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/pods/portforward/action"}, IsDataAction: true}},
+		},
+
+		{
+			"podsPortForwardGetFleet",
+			args{
+				isWildcardTest: false,
+				subRevReq: &authzv1.SubjectAccessReviewSpec{
+					ResourceAttributes: &authzv1.ResourceAttributes{Group: "", Resource: "pods", Subresource: "portforward", Version: "v1", Name: "test", Verb: "get"},
+				}, clusterType: "fleet",
+			},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "fleet/pods/portforward/action"}, IsDataAction: true}},
+		},
+
+		{
+			"servicesProxyGetAKS",
+			args{
+				isWildcardTest: false,
+				subRevReq: &authzv1.SubjectAccessReviewSpec{
+					ResourceAttributes: &authzv1.ResourceAttributes{Group: "", Resource: "services", Subresource: "proxy", Version: "v1", Name: "test", Verb: "get"},
+				}, clusterType: aksClusterType,
+			},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/services/proxy/action"}, IsDataAction: true}},
+		},
+
+		{
+			"nodesProxyGetAKS",
+			args{
+				isWildcardTest: false,
+				subRevReq: &authzv1.SubjectAccessReviewSpec{
+					ResourceAttributes: &authzv1.ResourceAttributes{Group: "", Resource: "nodes", Subresource: "proxy", Version: "v1", Name: "test", Verb: "get"},
+				}, clusterType: aksClusterType,
+			},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/nodes/proxy/action"}, IsDataAction: true}},
+		},
+
+		// A non-sensitive pods subresource (e.g. status) must still collapse to
+		// the base read action so this fix does not over-restrict legitimate reads.
+		{
+			"podsStatusSubresourceStillCollapsed",
+			args{
+				isWildcardTest: false,
+				subRevReq: &authzv1.SubjectAccessReviewSpec{
+					ResourceAttributes: &authzv1.ResourceAttributes{Group: "", Resource: "pods", Subresource: "status", Version: "v1", Name: "test", Verb: "get"},
+				}, clusterType: aksClusterType,
+			},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/pods/read"}, IsDataAction: true}},
+		},
+
+		// CSR with a non-sensitive subresource (e.g. approval, status)
+		// should still collapse to the base action, not preserve the subresource.
+		{
+			"csrApprovalSubresourceStillCollapsed",
+			args{
+				isWildcardTest: false,
+				subRevReq: &authzv1.SubjectAccessReviewSpec{
+					ResourceAttributes: &authzv1.ResourceAttributes{Group: "certificates.k8s.io", Resource: "certificatesigningrequests", Subresource: "approval", Version: "v1", Name: "test", Verb: "update"},
+				}, clusterType: aksClusterType,
+			},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/certificates.k8s.io/certificatesigningrequests/write"}, IsDataAction: true}},
+		},
+
 		{
 			"allStar",
 			args{
