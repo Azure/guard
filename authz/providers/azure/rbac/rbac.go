@@ -353,20 +353,37 @@ func (a *AccessInfo) SetResultInCache(ctx context.Context, request *authzv1.Subj
 	return store.Set(key, result)
 }
 
-// discoveryPathRoots are the non-resource path roots that Guard may authorize
-// for any authenticated user without an Azure RBAC check. A request path counts
-// as discovery only when it equals one of these roots exactly or is nested
-// beneath it on a path-segment boundary (root + "/..."). Loose prefix matching
-// (for example "/apiz" or "/healthzz") must never be treated as discovery.
-var discoveryPathRoots = []string{"/api", "/apis", "/openapi", "/version", "/healthz"}
+// discoveryExactPaths and discoveryPrefixPaths together reproduce the non-resource
+// URLs of the upstream Kubernetes "system:discovery" ClusterRole
+// (plugin/pkg/auth/authorizer/rbac/bootstrappolicy/policy.go), which upstream binds
+// to the system:authenticated group. Upstream evaluates a rule URL ending in "*" as
+// a prefix match with the "*" trimmed and every other rule URL as an exact string
+// match (rbacv1.NonResourceURLMatches), so "/api/*" contributes the "/api/" prefix
+// while "/healthz" and "/version" match only themselves. Guard must not exempt
+// anything outside this set, so paths such as "/healthz/etcd" or "/apiz" get a
+// regular Azure RBAC check instead (MSRC 132991).
+var discoveryExactPaths = map[string]struct{}{
+	"/api":      {},
+	"/apis":     {},
+	"/healthz":  {},
+	"/livez":    {},
+	"/openapi":  {},
+	"/readyz":   {},
+	"/version":  {},
+	"/version/": {},
+}
 
-// isNonResourceDiscoveryPath reports whether the lowercased non-resource path is
-// one of the well-known Kubernetes discovery or health endpoints. It rejects any
-// path containing a ".." traversal segment so a path cannot match on a loose
-// prefix and, once path.Clean normalizes it elsewhere, share the cache key of an
-// unrelated resource request (see getResultCacheKey). Matching on an exact root
-// or a path-segment boundary keeps the discovery exemption scoped to real
-// discovery endpoints (MSRC 132991).
+// discoveryPrefixPaths are the upstream "/api/*", "/apis/*" and "/openapi/*" rules
+// with the trailing "*" trimmed, matched as prefixes exactly as upstream does.
+var discoveryPrefixPaths = []string{"/api/", "/apis/", "/openapi/"}
+
+// isNonResourceDiscoveryPath reports whether the lowercased non-resource path is one
+// of the discovery endpoints granted by the upstream "system:discovery" ClusterRole.
+// Guard is deliberately stricter than upstream on one point: a path containing a ".."
+// traversal segment is never treated as discovery, so it cannot match a prefix rule
+// here and, once path.Clean normalizes it elsewhere, share the cache key of an
+// unrelated resource request (see getResultCacheKey). Reporting false is not a denial;
+// the request falls through to the regular Azure RBAC check (MSRC 132991).
 func isNonResourceDiscoveryPath(lowerPath string) bool {
 	if lowerPath == "" {
 		return false
@@ -376,8 +393,11 @@ func isNonResourceDiscoveryPath(lowerPath string) bool {
 			return false
 		}
 	}
-	for _, root := range discoveryPathRoots {
-		if lowerPath == root || strings.HasPrefix(lowerPath, root+"/") {
+	if _, ok := discoveryExactPaths[lowerPath]; ok {
+		return true
+	}
+	for _, prefix := range discoveryPrefixPaths {
+		if strings.HasPrefix(lowerPath, prefix) {
 			return true
 		}
 	}
