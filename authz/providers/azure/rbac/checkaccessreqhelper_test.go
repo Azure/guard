@@ -373,6 +373,8 @@ func Test_getDataActions(t *testing.T) {
 			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "arc/batch/cronjobs/write"}, IsDataAction: true}},
 		},
 
+		// certificatesigningrequests/approvals is not a safe subresource, so it
+		// no longer collapses into the parent delete action.
 		{
 			"aks6",
 			args{
@@ -381,7 +383,7 @@ func Test_getDataActions(t *testing.T) {
 					ResourceAttributes: &authzv1.ResourceAttributes{Group: "certificates.k8s.io", Resource: "certificatesigningrequests", Subresource: "approvals", Version: "v1", Name: "test", Verb: "deletecollection"},
 				}, clusterType: aksClusterType,
 			},
-			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/certificates.k8s.io/certificatesigningrequests/delete"}, IsDataAction: true}},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/certificates.k8s.io/certificatesigningrequests/approvals/action"}, IsDataAction: true}},
 		},
 
 		{
@@ -392,7 +394,7 @@ func Test_getDataActions(t *testing.T) {
 					ResourceAttributes: &authzv1.ResourceAttributes{Group: "certificates.k8s.io", Resource: "certificatesigningrequests", Subresource: "approvals", Version: "v1", Name: "test", Verb: "deletecollection"},
 				}, clusterType: "fleet",
 			},
-			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "fleet/certificates.k8s.io/certificatesigningrequests/delete"}, IsDataAction: true}},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "fleet/certificates.k8s.io/certificatesigningrequests/approvals/action"}, IsDataAction: true}},
 		},
 
 		{
@@ -501,8 +503,8 @@ func Test_getDataActions(t *testing.T) {
 			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/nodes/proxy/action"}, IsDataAction: true}},
 		},
 
-		// A non-sensitive pods subresource (e.g. status) must still collapse to
-		// the base read action so this fix does not over-restrict legitimate reads.
+		// status is a safe subresource: it collapses to the parent read action so
+		// legitimate read-only access is not over-restricted.
 		{
 			"podsStatusSubresourceStillCollapsed",
 			args{
@@ -514,17 +516,55 @@ func Test_getDataActions(t *testing.T) {
 			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/pods/read"}, IsDataAction: true}},
 		},
 
-		// CSR with a non-sensitive subresource (e.g. approval, status)
-		// should still collapse to the base action, not preserve the subresource.
+		// certificatesigningrequests/approval is not a safe subresource, so it
+		// gets its own DataAction instead of collapsing into the parent write.
 		{
-			"csrApprovalSubresourceStillCollapsed",
+			"csrApprovalSubresourceGetsOwnAction",
 			args{
 				isWildcardTest: false,
 				subRevReq: &authzv1.SubjectAccessReviewSpec{
 					ResourceAttributes: &authzv1.ResourceAttributes{Group: "certificates.k8s.io", Resource: "certificatesigningrequests", Subresource: "approval", Version: "v1", Name: "test", Verb: "update"},
 				}, clusterType: aksClusterType,
 			},
-			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/certificates.k8s.io/certificatesigningrequests/write"}, IsDataAction: true}},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/certificates.k8s.io/certificatesigningrequests/approval/action"}, IsDataAction: true}},
+		},
+
+		// Safe subresources collapse into the parent resource action: upstream's
+		// read-only view role grants them alongside the parent resource.
+		{
+			"podsLogSubresourceCollapses",
+			args{
+				isWildcardTest: false,
+				subRevReq: &authzv1.SubjectAccessReviewSpec{
+					ResourceAttributes: &authzv1.ResourceAttributes{Group: "", Resource: "pods", Subresource: "log", Version: "v1", Name: "test", Verb: "get"},
+				}, clusterType: aksClusterType,
+			},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/pods/read"}, IsDataAction: true}},
+		},
+
+		{
+			"deploymentsScaleSubresourceCollapses",
+			args{
+				isWildcardTest: false,
+				subRevReq: &authzv1.SubjectAccessReviewSpec{
+					ResourceAttributes: &authzv1.ResourceAttributes{Group: "apps", Resource: "deployments", Subresource: "scale", Version: "v1", Name: "test", Verb: "update"},
+				}, clusterType: aksClusterType,
+			},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/apps/deployments/write"}, IsDataAction: true}},
+		},
+
+		// An unclassified subresource - a new Kubernetes subresource, a CRD or an
+		// aggregated API - must NOT inherit the parent resource permission. This is
+		// the point of listing what is safe rather than what is sensitive.
+		{
+			"unknownSubresourceIsNotCollapsed",
+			args{
+				isWildcardTest: false,
+				subRevReq: &authzv1.SubjectAccessReviewSpec{
+					ResourceAttributes: &authzv1.ResourceAttributes{Group: "", Resource: "pods", Subresource: "somefuturesubresource", Version: "v1", Name: "test", Verb: "get"},
+				}, clusterType: aksClusterType,
+			},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/pods/somefuturesubresource/action"}, IsDataAction: true}},
 		},
 
 		{
@@ -1457,7 +1497,8 @@ func Test_getResultCacheKey(t *testing.T) {
 				},
 				allowSubresourceTypeCheck: false,
 			},
-			"beta@msn.com/-/-/nodes/read",
+			// scopes is not a safe subresource, so it no longer collapses to nodes/read.
+			"beta@msn.com/-/-/nodes/scopes/action",
 		},
 
 		{
