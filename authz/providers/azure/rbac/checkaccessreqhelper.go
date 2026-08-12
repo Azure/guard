@@ -49,13 +49,13 @@ const (
 	NonAADUserNotAllowedVerdict = "Access denied by Azure RBAC for non AAD users. Configure --azure.skip-authz-for-non-aad-users to enable access. If you are an AAD user, please set Extra:oid parameter for impersonated user in the kubeconfig."
 	CheckAccessErrorVerdict     = "Access denied due to Azure RBAC check failure. Please retry later."
 	PodsResource                = "pods"
-	ServicesResource            = "services"
-	NodesResource               = "nodes"
 	CustomResources             = "customresources"
-	ProxySubresource            = "proxy"
-	AttachSubresource           = "attach"
-	PortForwardSubresource      = "portforward"
-	ExecSubresource             = "exec"
+	StatusSubresource           = "status"
+	ScaleSubresource            = "scale"
+	LogSubresource              = "log"
+	LogsSubresource             = "logs"
+	actionSuffix                = "action"
+	wildcardValue               = "*"
 	ReadVerb                    = "read"
 	WriteVerb                   = "write"
 	DeleteVerb                  = "delete"
@@ -254,40 +254,52 @@ func getActionName(verb string) string {
 	}
 }
 
-// securitySensitiveSubresources lists resource/subresource pairs that upstream
-// Kubernetes treats as distinct authorization targets. For these, the
-// subresource is preserved in the DataAction string
-// ("<resource>/<subresource>/action") rather than collapsed into the base
-// resource action, so the authorization decision keeps the same granularity as
-// the upstream Kubernetes RBAC model (see the bootstrappolicy view/edit
-// ClusterRoles).
+// safeSubresources lists the subresources that upstream Kubernetes treats as
+// part of the parent resource's read/write permission: the read-only "view"
+// ClusterRole grants them alongside the parent resource (pods/log, pods/status,
+// deployments/scale, and the /status and /scale subresources generally). For
+// these, the subresource is collapsed into the base resource action
+// (<resource>/read, <resource>/write, ...).
 //
-// The pods exec/attach/portforward/proxy, services/proxy and nodes/proxy
-// subresources are granted separately from base read/write in the upstream
-// roles, so they are mapped to their own DataAction rather than to
-// <resource>/read or <resource>/write.
-var securitySensitiveSubresources = map[string]map[string]struct{}{
-	PodsResource: {
-		ExecSubresource:        {},
-		AttachSubresource:      {},
-		PortForwardSubresource: {},
-		ProxySubresource:       {},
-	},
-	ServicesResource: {
-		ProxySubresource: {},
-	},
-	NodesResource: {
-		ProxySubresource: {},
-	},
+// Every other subresource keeps its own DataAction
+// ("<resource>/<subresource>/action"). The default is deliberately the distinct
+// action rather than the collapsed one: a subresource that has not been
+// classified - including subresources added by future Kubernetes versions, by
+// CRDs, or by aggregated API servers - must not be silently covered by the
+// parent resource's permission.
+//
+// Special verbs (bind, escalate, use, impersonate, ...) already encode the
+// privileged operation in the action name, so getResourceAndAction leaves those
+// mappings unchanged.
+var safeSubresources = map[string]struct{}{
+	StatusSubresource: {},
+	ScaleSubresource:  {},
+	// Kubernetes names this subresource "log"; guard has historically also seen
+	// the plural spelling, so both are treated as the same read-only capability.
+	LogSubresource:  {},
+	LogsSubresource: {},
 }
 
 func getResourceAndAction(resource string, subResource string, verb string) string {
-	if subs, ok := securitySensitiveSubresources[resource]; ok && subResource != "" {
-		if _, sensitive := subs[subResource]; sensitive {
-			return path.Join(resource, subResource, "action")
-		}
+	action := getActionName(verb)
+
+	// Nothing to preserve when there is no subresource, or when the request is a
+	// wildcard one (those are expanded from the operations map elsewhere).
+	if subResource == "" || subResource == wildcardValue || resource == wildcardValue || action == wildcardValue {
+		return path.Join(resource, action)
 	}
-	return path.Join(resource, getActionName(verb))
+
+	// Special verbs already encode the privileged operation in the action name;
+	// the verb, not the subresource, identifies what is being authorized.
+	if strings.HasSuffix(action, actionSuffix) {
+		return path.Join(resource, action)
+	}
+
+	if _, safe := safeSubresources[subResource]; safe {
+		return path.Join(resource, action)
+	}
+
+	return path.Join(resource, subResource, actionSuffix)
 }
 
 func getDataActions(ctx context.Context, subRevReq *authzv1.SubjectAccessReviewSpec, clusterType string, allowCustomResourceTypeCheck bool, allowSubresourceTypeCheck bool) ([]azureutils.AuthorizationActionInfo, error) {
