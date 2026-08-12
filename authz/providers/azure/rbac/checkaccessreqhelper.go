@@ -18,6 +18,9 @@ package rbac
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -627,54 +630,103 @@ func createAuthorizationActionInfoList(filteredOperations azureutils.OperationsM
 	return authInfos, nil
 }
 
-func defaultDir(s string) string {
-	if s != "" {
-		return s
-	}
-	return "-" // invalid for a namespace
-}
+// cacheKeyShape identifies which attribute set a SubjectAccessReviewSpec carries.
+// It is encoded as a single fixed-width byte at the head of every cache key, which
+// keeps the three shapes in disjoint key spaces no matter how many fields each
+// branch happens to encode. Upstream uses a single bool for its two shapes; a bool
+// cannot express the third shape, a spec carrying neither attribute set.
+type cacheKeyShape byte
 
-// Cache key construction for non-resource requests. cacheKeyFieldSeparator is a
-// NUL byte, which cannot legally appear in a URL path, a Kubernetes verb, or an
-// AAD user name, so it unambiguously separates the fields and guarantees a
-// non-resource key can never equal a resource key (which is "/"-joined and NUL
-// free). nonResourceCacheKeyPrefix names that disjoint namespace.
 const (
-	nonResourceCacheKeyPrefix = "nonresource"
-	cacheKeyFieldSeparator    = "\x00"
+	cacheKeyShapeNeither     cacheKeyShape = 0
+	cacheKeyShapeResource    cacheKeyShape = 1
+	cacheKeyShapeNonResource cacheKeyShape = 2
 )
 
-func getResultCacheKey(subRevReq *authzv1.SubjectAccessReviewSpec, allowSubresourceTypeCheck bool) string {
-	cacheKey := subRevReq.User
+// cacheKeyBuilder encodes the fields that identify a CheckAccess result into an
+// unambiguous byte string and hashes it. The layout follows buildKey in upstream
+// k8s.io/apiserver/pkg/endpoints/filters/impersonation/cache.go.
+//
+// Every variable-length field carries a uint32 big-endian length prefix, so no
+// field value can move a field boundary: two requests share an encoding only when
+// every field is byte-for-byte equal. Joining caller-influenced fields with a
+// separator instead leaves the boundaries ambiguous, because a field may contain
+// the separator, may be rewritten by normalization (path.Clean resolving ".."), or
+// may be replaced by a placeholder that another field can also spell (MSRC 132991).
+//
+// build appends the requestor's user name to the hash in clear text. The hash is
+// always 64 characters, so the suffix boundary is fixed and two keys are equal only
+// if their users are equal. The user name is set by the authenticator rather than
+// chosen by the caller, so a hash collision is only ever reachable among a single
+// user's own keys, where it cannot yield a permission that user does not already
+// hold. Hashing also bounds the key length regardless of caller-supplied input.
+type cacheKeyBuilder struct {
+	user    string
+	builder []byte
+}
 
-	if subRevReq.ResourceAttributes != nil {
-		cacheKey = path.Join(cacheKey, defaultDir(subRevReq.ResourceAttributes.Namespace))
-		cacheKey = path.Join(cacheKey, defaultDir(subRevReq.ResourceAttributes.Group))
-		action := getResourceAndAction(subRevReq.ResourceAttributes.Resource, subRevReq.ResourceAttributes.Subresource, subRevReq.ResourceAttributes.Verb)
-		cacheKey = path.Join(cacheKey, action)
+// newCacheKeyBuilder starts a key for user and shape. It writes the shape byte and
+// the user name first so that ordering is identical for every shape.
+func newCacheKeyBuilder(user string, shape cacheKeyShape) *cacheKeyBuilder {
+	c := &cacheKeyBuilder{user: user, builder: make([]byte, 0, 256)}
+	c.builder = append(c.builder, byte(shape))
+	c.addString(user)
+	return c
+}
 
-		// Cache results for subresources of interest separately
-		if allowSubresourceTypeCheck {
-			if shouldHandleSubresource(subRevReq.ResourceAttributes.Resource, subRevReq.ResourceAttributes.Subresource) {
-				cacheKey = path.Join(cacheKey, subRevReq.ResourceAttributes.Subresource)
-			}
-		}
-	} else if subRevReq.NonResourceAttributes != nil {
-		// The non-resource path is fully caller-controlled and may contain ".."
-		// segments. It must NOT flow through path.Join/path.Clean, which would
-		// resolve ".." and let a path (e.g. "/apiz/../-/-/secrets") normalize onto
-		// the cache key of an unrelated resource request, so a decision cached for
-		// one request could be served for a different one (MSRC 132991). Join the
-		// fields with a NUL separator into a namespace disjoint from resource keys.
-		cacheKey = strings.Join([]string{
-			nonResourceCacheKeyPrefix,
-			subRevReq.User,
-			subRevReq.NonResourceAttributes.Path,
-			getActionName(subRevReq.NonResourceAttributes.Verb),
-		}, cacheKeyFieldSeparator)
+// addString appends value with a uint32 big-endian length prefix.
+func (c *cacheKeyBuilder) addString(value string) {
+	var length [4]byte
+	binary.BigEndian.PutUint32(length[:], uint32(len(value)))
+	c.builder = append(c.builder, length[:]...)
+	c.builder = append(c.builder, value...)
+}
+
+// build returns the hex-encoded digest of the accumulated fields, suffixed with
+// the un-hashed user name.
+func (c *cacheKeyBuilder) build() string {
+	hashed := sha256.Sum256(c.builder)
+	return hex.EncodeToString(hashed[:]) + "/" + c.user
+}
+
+// cachedSubresource returns the subresource that takes part in the cache key. Only
+// subresources carried as a distinct DataAction attribute are cached separately;
+// every other subresource shares the base resource's entry.
+func cachedSubresource(attr *authzv1.ResourceAttributes, allowSubresourceTypeCheck bool) string {
+	if allowSubresourceTypeCheck && shouldHandleSubresource(attr.Resource, attr.Subresource) {
+		return attr.Subresource
 	}
+	return ""
+}
 
-	return cacheKey
+// getResultCacheKey returns the key under which the CheckAccess result for
+// subRevReq is cached. See cacheKeyBuilder for why the encoding is length-prefixed
+// and hashed rather than joined.
+//
+// The set of fields is unchanged, so cache hit rates are unaffected: the resource
+// branch keys on the derived action from getResourceAndAction, which maps get, list
+// and watch onto "read", and the non-resource branch keys on getActionName.
+func getResultCacheKey(subRevReq *authzv1.SubjectAccessReviewSpec, allowSubresourceTypeCheck bool) string {
+	switch {
+	case subRevReq.ResourceAttributes != nil:
+		attr := subRevReq.ResourceAttributes
+		key := newCacheKeyBuilder(subRevReq.User, cacheKeyShapeResource)
+		key.addString(attr.Namespace)
+		key.addString(attr.Group)
+		key.addString(getResourceAndAction(attr.Resource, attr.Subresource, attr.Verb))
+		key.addString(cachedSubresource(attr, allowSubresourceTypeCheck))
+		return key.build()
+
+	case subRevReq.NonResourceAttributes != nil:
+		attr := subRevReq.NonResourceAttributes
+		key := newCacheKeyBuilder(subRevReq.User, cacheKeyShapeNonResource)
+		key.addString(attr.Path)
+		key.addString(getActionName(attr.Verb))
+		return key.build()
+
+	default:
+		return newCacheKeyBuilder(subRevReq.User, cacheKeyShapeNeither).build()
+	}
 }
 
 func prepareCheckAccessRequestBody(ctx context.Context, req *authzv1.SubjectAccessReviewSpec, clusterType string, resourceId string, useNamespaceResourceScopeFormat bool, allowCustomResourceTypeCheck bool, allowSubresourceTypeCheck bool) ([]*CheckAccessRequest, error) {

@@ -380,10 +380,11 @@ var discoveryPrefixPaths = []string{"/api/", "/apis/", "/openapi/"}
 // isNonResourceDiscoveryPath reports whether the lowercased non-resource path is one
 // of the discovery endpoints granted by the upstream "system:discovery" ClusterRole.
 // Guard is deliberately stricter than upstream on one point: a path containing a ".."
-// traversal segment is never treated as discovery, so it cannot match a prefix rule
-// here and, once path.Clean normalizes it elsewhere, share the cache key of an
-// unrelated resource request (see getResultCacheKey). Reporting false is not a denial;
-// the request falls through to the regular Azure RBAC check (MSRC 132991).
+// traversal segment is never treated as discovery. nonResourceAttributes.path on a
+// SelfSubjectAccessReview is fully caller-controlled and is never routed by the API
+// server, so without this check a path such as "/api/../.." would match the "/api/"
+// prefix rule and be exempted from the Azure RBAC check. Reporting false is not a
+// denial; the request falls through to the regular Azure RBAC check (MSRC 132991).
 func isNonResourceDiscoveryPath(lowerPath string) bool {
 	if lowerPath == "" {
 		return false

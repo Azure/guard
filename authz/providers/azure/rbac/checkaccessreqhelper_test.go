@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/url"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -1335,167 +1336,178 @@ func Test_prepareCheckAccessRequestBodyWithSubresourceDisabled(t *testing.T) {
 	}
 }
 
-func Test_getResultCacheKey(t *testing.T) {
-	type args struct {
-		subRevReq                 *authzv1.SubjectAccessReviewSpec
-		allowSubresourceTypeCheck bool
+// Cache keys are SHA-256 digests, so the tests below assert invariants rather
+// than literal key strings: asserting a hardcoded digest would only restate the
+// implementation.
+
+const (
+	cacheKeyTestUser  = "alpha@bing.com"
+	cacheKeyTestGroup = "apps"
+)
+
+// cacheKeyDigestPattern matches the hashed portion of a cache key.
+var cacheKeyDigestPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// cacheKeyCase is one input to getResultCacheKey.
+type cacheKeyCase struct {
+	name                      string
+	subRevReq                 *authzv1.SubjectAccessReviewSpec
+	allowSubresourceTypeCheck bool
+}
+
+// cacheKeyDistinctCases returns requests whose cache keys must all differ. It
+// covers the field encodings that a joined key rendered ambiguous: the "-"
+// placeholder that an empty namespace or group used to be mapped onto, a user
+// name carrying the "/" separator, and a namespace/group pair whose boundary can
+// be shifted without changing their concatenation.
+func cacheKeyDistinctCases() []cacheKeyCase {
+	resourceCase := func(name, user, namespace, group string) cacheKeyCase {
+		return cacheKeyCase{
+			name: name,
+			subRevReq: &authzv1.SubjectAccessReviewSpec{
+				User: user,
+				ResourceAttributes: &authzv1.ResourceAttributes{
+					Namespace: namespace, Group: group, Resource: "pods", Verb: "get",
+				},
+			},
+		}
 	}
-	tests := []struct {
-		name string
-		args args
-		want string
-	}{
-		{
-			aksClusterType,
-			args{
-				subRevReq: &authzv1.SubjectAccessReviewSpec{
-					User:                  "charlie@yahoo.com",
-					NonResourceAttributes: &authzv1.NonResourceAttributes{Path: "/apis/v1", Verb: "list"},
-				},
-				allowSubresourceTypeCheck: false,
-			},
-			strings.Join([]string{nonResourceCacheKeyPrefix, "charlie@yahoo.com", "/apis/v1", "read"}, cacheKeyFieldSeparator),
-		},
 
-		{
-			aksClusterType,
-			args{
-				subRevReq: &authzv1.SubjectAccessReviewSpec{
-					User:                  "echo@outlook.com",
-					NonResourceAttributes: &authzv1.NonResourceAttributes{Path: "/logs", Verb: "get"},
+	subresourceCase := func(name string, allowSubresourceTypeCheck bool) cacheKeyCase {
+		return cacheKeyCase{
+			name: name,
+			subRevReq: &authzv1.SubjectAccessReviewSpec{
+				User: cacheKeyTestUser,
+				ResourceAttributes: &authzv1.ResourceAttributes{
+					Namespace: "sub", Resource: "pods", Subresource: "logs", Verb: "get",
 				},
-				allowSubresourceTypeCheck: false,
 			},
-			strings.Join([]string{nonResourceCacheKeyPrefix, "echo@outlook.com", "/logs", "read"}, cacheKeyFieldSeparator),
-		},
+			allowSubresourceTypeCheck: allowSubresourceTypeCheck,
+		}
+	}
 
+	return []cacheKeyCase{
+		resourceCase("empty namespace", cacheKeyTestUser, "", cacheKeyTestGroup),
+		resourceCase("namespace equal to the former empty placeholder", cacheKeyTestUser, "-", cacheKeyTestGroup),
+		resourceCase("empty group", cacheKeyTestUser, "dev", ""),
+		resourceCase("group equal to the former empty placeholder", cacheKeyTestUser, "dev", "-"),
+		resourceCase("namespace and group split as ab|c", cacheKeyTestUser, "ab", "c"),
+		resourceCase("namespace and group split as a|bc", cacheKeyTestUser, "a", "bc"),
+		resourceCase("user carrying the separator, short namespace", "a/b", "c", cacheKeyTestGroup),
+		resourceCase("user without the separator, long namespace", "a", "b/c", cacheKeyTestGroup),
+		subresourceCase("subresource check disabled", false),
+		subresourceCase("subresource check enabled", true),
 		{
-			aksClusterType,
-			args{
-				subRevReq: &authzv1.SubjectAccessReviewSpec{
-					User: "alpha@bing.com",
-					ResourceAttributes: &authzv1.ResourceAttributes{
-						Namespace: "dev", Group: "", Resource: "pods",
-						Subresource: "status", Version: "v1", Name: "test", Verb: "delete",
-					},
+			name: "resource request",
+			subRevReq: &authzv1.SubjectAccessReviewSpec{
+				User: cacheKeyTestUser,
+				ResourceAttributes: &authzv1.ResourceAttributes{
+					Namespace: "shape", Group: cacheKeyTestGroup, Resource: "deployments", Verb: "get",
 				},
-				allowSubresourceTypeCheck: false,
 			},
-			"alpha@bing.com/dev/-/pods/delete",
 		},
-
 		{
-			aksClusterType,
-			args{
-				subRevReq: &authzv1.SubjectAccessReviewSpec{
-					User: "alpha@bing.com",
-					ResourceAttributes: &authzv1.ResourceAttributes{
-						Namespace: "dev", Group: "", Resource: "pods",
-						Subresource: "status", Version: "v1", Name: "test", Verb: "delete",
-					},
-				},
-				allowSubresourceTypeCheck: true,
+			name: "non-resource request",
+			subRevReq: &authzv1.SubjectAccessReviewSpec{
+				User:                  cacheKeyTestUser,
+				NonResourceAttributes: &authzv1.NonResourceAttributes{Path: "/healthz", Verb: "get"},
 			},
-			"alpha@bing.com/dev/-/pods/delete",
 		},
-
 		{
-			aksClusterType,
-			args{
-				subRevReq: &authzv1.SubjectAccessReviewSpec{
-					User: "alpha@bing.com",
-					ResourceAttributes: &authzv1.ResourceAttributes{
-						Namespace: "dev", Group: "", Resource: "pods",
-						Subresource: "logs", Version: "v1", Name: "test", Verb: "get",
-					},
-				},
-				allowSubresourceTypeCheck: false,
-			},
-			"alpha@bing.com/dev/-/pods/read",
-		},
-
-		{
-			aksClusterType,
-			args{
-				subRevReq: &authzv1.SubjectAccessReviewSpec{
-					User: "alpha@bing.com",
-					ResourceAttributes: &authzv1.ResourceAttributes{
-						Namespace: "dev", Group: "", Resource: "pods",
-						Subresource: "logs", Version: "v1", Name: "test", Verb: "get",
-					},
-				},
-				allowSubresourceTypeCheck: true,
-			},
-			"alpha@bing.com/dev/-/pods/read/logs",
-		},
-
-		{
-			"arc",
-			args{
-				subRevReq: &authzv1.SubjectAccessReviewSpec{
-					User: "beta@msn.com",
-					ResourceAttributes: &authzv1.ResourceAttributes{
-						Namespace: "azure-arc",
-						Group:     "authentication.k8s.io", Resource: "userextras", Subresource: "scopes", Version: "v1",
-						Name: "test", Verb: "impersonate",
-					},
-				},
-				allowSubresourceTypeCheck: false,
-			},
-			"beta@msn.com/azure-arc/authentication.k8s.io/userextras/impersonate/action",
-		},
-
-		{
-			"arc",
-			args{
-				subRevReq: &authzv1.SubjectAccessReviewSpec{
-					User: "beta@msn.com",
-					ResourceAttributes: &authzv1.ResourceAttributes{
-						Namespace: "", Group: "", Resource: "nodes",
-						Subresource: "scopes", Version: "v1", Name: "", Verb: "list",
-					},
-				},
-				allowSubresourceTypeCheck: false,
-			},
-			"beta@msn.com/-/-/nodes/read",
-		},
-
-		{
-			"allStar",
-			args{
-				subRevReq: &authzv1.SubjectAccessReviewSpec{
-					User: "beta@msn.com",
-					ResourceAttributes: &authzv1.ResourceAttributes{
-						Namespace: "", Group: "*", Resource: "*",
-						Subresource: "scopes", Version: "v1", Name: "", Verb: "*",
-					},
-				},
-				allowSubresourceTypeCheck: false,
-			},
-			"beta@msn.com/-/*/*/*",
-		},
-
-		{
-			"allStarNSscope",
-			args{
-				subRevReq: &authzv1.SubjectAccessReviewSpec{
-					User: "beta@msn.com",
-					ResourceAttributes: &authzv1.ResourceAttributes{
-						Namespace: "dev", Group: "*", Resource: "*",
-						Subresource: "scopes", Version: "v1", Name: "", Verb: "*",
-					},
-				},
-				allowSubresourceTypeCheck: false,
-			},
-			"beta@msn.com/dev/*/*/*",
+			name:      "neither resource nor non-resource attributes",
+			subRevReq: &authzv1.SubjectAccessReviewSpec{User: cacheKeyTestUser},
 		},
 	}
-	for _, tt := range tests {
+}
+
+// Test_getResultCacheKey_distinctRequestsGetDistinctKeys asserts that requests
+// which must not share a cached decision also do not share a cache key.
+func Test_getResultCacheKey_distinctRequestsGetDistinctKeys(t *testing.T) {
+	cases := cacheKeyDistinctCases()
+	seen := make(map[string]string, len(cases))
+
+	for _, tt := range cases {
+		got := getResultCacheKey(tt.subRevReq, tt.allowSubresourceTypeCheck)
+		if previous, collides := seen[got]; collides {
+			t.Errorf("%q and %q share cache key %q", previous, tt.name, got)
+			continue
+		}
+		seen[got] = tt.name
+	}
+}
+
+// Test_getResultCacheKey_isDeterministic asserts the key depends only on the
+// request, so a cached decision stays reachable across calls.
+func Test_getResultCacheKey_isDeterministic(t *testing.T) {
+	for _, tt := range cacheKeyDistinctCases() {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := getResultCacheKey(tt.args.subRevReq, tt.args.allowSubresourceTypeCheck); got != tt.want {
-				t.Errorf("getResultCacheKey() = %v, want %v", got, tt.want)
+			want := getResultCacheKey(tt.subRevReq, tt.allowSubresourceTypeCheck)
+			for i := 0; i < 3; i++ {
+				if got := getResultCacheKey(tt.subRevReq, tt.allowSubresourceTypeCheck); got != want {
+					t.Errorf("getResultCacheKey() repeat %d = %q, want %q", i, got, want)
+				}
 			}
 		})
+	}
+}
+
+// Test_getResultCacheKey_isUserNamespaced asserts every key is a hex digest
+// suffixed with the un-hashed user name. Because the digest is fixed width, the
+// suffix boundary is unambiguous and keys of two different users can never be
+// equal, which confines any digest collision to a single user's own keys.
+func Test_getResultCacheKey_isUserNamespaced(t *testing.T) {
+	for _, tt := range cacheKeyDistinctCases() {
+		t.Run(tt.name, func(t *testing.T) {
+			got := getResultCacheKey(tt.subRevReq, tt.allowSubresourceTypeCheck)
+
+			suffix := "/" + tt.subRevReq.User
+			if !strings.HasSuffix(got, suffix) {
+				t.Fatalf("getResultCacheKey() = %q, want suffix %q", got, suffix)
+			}
+
+			digest := strings.TrimSuffix(got, suffix)
+			if !cacheKeyDigestPattern.MatchString(digest) {
+				t.Errorf("getResultCacheKey() digest = %q, want 64 lowercase hex characters", digest)
+			}
+		})
+	}
+}
+
+// Test_getResultCacheKey_readVerbsShareCacheKey pins the cache hit semantics that
+// the key must preserve: get, list and watch all map to the "read" action and so
+// share one entry. It fails if the key is ever derived from the raw verb.
+func Test_getResultCacheKey_readVerbsShareCacheKey(t *testing.T) {
+	readVerbs := []string{"list", "watch"}
+
+	for _, allowSubresourceTypeCheck := range []bool{false, true} {
+		resourceKey := func(verb string) string {
+			return getResultCacheKey(&authzv1.SubjectAccessReviewSpec{
+				User: cacheKeyTestUser,
+				ResourceAttributes: &authzv1.ResourceAttributes{
+					Namespace: "dev", Resource: "secrets", Verb: verb,
+				},
+			}, allowSubresourceTypeCheck)
+		}
+		nonResourceKey := func(verb string) string {
+			return getResultCacheKey(&authzv1.SubjectAccessReviewSpec{
+				User:                  cacheKeyTestUser,
+				NonResourceAttributes: &authzv1.NonResourceAttributes{Path: "/healthz", Verb: verb},
+			}, allowSubresourceTypeCheck)
+		}
+
+		for _, keyFor := range []func(string) string{resourceKey, nonResourceKey} {
+			want := keyFor("get")
+			for _, verb := range readVerbs {
+				if got := keyFor(verb); got != want {
+					t.Errorf("verb %q (allowSubresourceTypeCheck=%v) key = %q, want the get key %q",
+						verb, allowSubresourceTypeCheck, got, want)
+				}
+			}
+			if got := keyFor("delete"); got == want {
+				t.Errorf("verb delete (allowSubresourceTypeCheck=%v) must not share the read key %q",
+					allowSubresourceTypeCheck, want)
+			}
+		}
 	}
 }
 
@@ -1529,6 +1541,7 @@ func Test_getResultCacheKey_noResourceNonResourceCollision(t *testing.T) {
 			resourceKeys[getResultCacheKey(r, allowSubresourceTypeCheck)] = struct{}{}
 		}
 
+		nonResourceKeys := make(map[string]string, len(craftedPaths))
 		for _, p := range craftedPaths {
 			nonRes := &authzv1.SubjectAccessReviewSpec{
 				User:                  user,
@@ -1539,9 +1552,12 @@ func Test_getResultCacheKey_noResourceNonResourceCollision(t *testing.T) {
 				t.Errorf("non-resource path %q (allowSubresourceTypeCheck=%v) collides with a secrets resource cache key: %q",
 					p, allowSubresourceTypeCheck, got)
 			}
-			if !strings.Contains(got, cacheKeyFieldSeparator) {
-				t.Errorf("non-resource cache key %q for path %q must use the NUL field separator", got, p)
+			if previous, collides := nonResourceKeys[got]; collides {
+				t.Errorf("non-resource paths %q and %q (allowSubresourceTypeCheck=%v) share cache key %q",
+					previous, p, allowSubresourceTypeCheck, got)
+				continue
 			}
+			nonResourceKeys[got] = p
 		}
 	}
 }
