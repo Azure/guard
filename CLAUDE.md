@@ -45,6 +45,9 @@ Do NOT commit if any check fails.
 
 ## Changing the DataAction Mapping
 
+Full explanation with diagrams: `authz/providers/azure/README.md`, section
+"DataAction Mapping". Keep the two in sync; this is the short operational form.
+
 `getResourceAndAction` / `getDataActions` in
 `authz/providers/azure/rbac/checkaccessreqhelper.go` compose the DataAction strings that
 Azure RBAC evaluates. A string Guard invents is only authorizable if the RP already

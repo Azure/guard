@@ -7,6 +7,7 @@ This directory contains the Azure RBAC authorization provider for Guard, which e
 - [Architecture Overview](#architecture-overview)
 - [When to Use Guard](#when-to-use-guard)
 - [CheckAccess API v2](#checkaccess-api-v2)
+- [DataAction Mapping](#dataaction-mapping)
 - [Custom Resource Definition (CRD) Support](#custom-resource-definition-crd-support)
 - [Building the Project](#building-the-project)
 - [Linting](#linting)
@@ -169,6 +170,124 @@ guard run \
 | Error Handling | HTTP status codes   | Structured errors        |
 | Metrics        | Same                | Same (consistent)        |
 
+## DataAction Mapping
+
+Guard turns each `SubjectAccessReview` into one or more Azure DataAction strings. The
+functions `getResourceAndAction` and `getDataActions` in `rbac/checkaccessreqhelper.go`
+compose these strings.
+
+Guard does not own the action namespace. Azure RBAC can evaluate an action only if the
+resource provider already publishes it. If Guard sends an action that the provider does
+not publish, the result is a denial that the customer cannot correct.
+
+### How an action is resolved
+
+```mermaid
+flowchart TD
+    A[SubjectAccessReview] --> B{User starts with 'system:'?}
+    B -->|Yes| C[NoOpinion. Azure RBAC is skipped.<br/>Standard AKS nodes stop here.]
+    B -->|No| D[getResourceAndAction]
+    D --> E[DataAction string]
+    E --> F{Operation published by the RP?}
+    F -->|Yes| G[Role can grant it.<br/>Allow or deny by assignment.]
+    F -->|No| H[Wildcard roles match only.<br/>Admin and Cluster Admin.]
+    H --> I[Denied for every<br/>least-privilege role]
+    I --> J[Customer cannot fix it.<br/>ARM refuses the action<br/>in a custom role.]
+
+    style C fill:#fff4ce,stroke:#8a6d00,color:#000
+    style H fill:#ffd6cc,stroke:#a33,color:#000
+    style I fill:#ffd6cc,stroke:#a33,color:#000
+    style J fill:#ffb3a7,stroke:#a33,color:#000
+```
+
+### The registry invariant
+
+Before you add or change an action string, confirm that the operation exists:
+
+```bash
+az provider operation show --namespace Microsoft.ContainerService -o json \
+  | jq -r '.. | objects | select(.name? // "" | test("<action-suffix>")) | .name'
+```
+
+If the operation is absent:
+
+- ARM refuses the action in a custom role definition. The error is
+  `InvalidDataActionOrNotDataAction - does not match any of the actions supported by the
+  providers`. The customer cannot grant the permission.
+- The built-in `Azure Kubernetes Service RBAC Reader` and `Writer` roles list leaf
+  actions, so they do not match the action either.
+- Only a role that carries a wildcard matches (`managedClusters/*`, `pods/*`,
+  `<resource>/*`). In practice this means Admin and Cluster Admin.
+
+Status of the actions used by the mapping, measured on 2026-08-13:
+
+| Action                                                                                | Registered |
+| ------------------------------------------------------------------------------------- | ---------- |
+| `managedClusters/pods/{read,write,delete}`                                             | Yes        |
+| `managedClusters/pods/exec/action`                                                     | Yes        |
+| `managedClusters/certificates.k8s.io/certificatesigningrequests/{read,write,delete}`   | Yes        |
+| `managedClusters/pods/{attach,portforward,proxy}/action`                               | No         |
+| `managedClusters/services/proxy/action`                                                | No         |
+| `managedClusters/nodes/proxy/action`                                                   | No         |
+| `managedClusters/certificates.k8s.io/certificatesigningrequests/nodeclient/action`     | No         |
+
+### Review gate for a mapping change
+
+```mermaid
+flowchart LR
+    B1[Change the mapping] --> B2[Add a unit test<br/>for the string]
+    B2 --> B3[Check the RP<br/>operations registry]
+    B3 --> B4{Operation exists?}
+    B4 -->|Yes| B5[Merge]
+    B4 -->|No| B6[Hold. The RP manifest<br/>must ship first.]
+
+    style B3 fill:#d4f5d4,stroke:#2a7,color:#000
+    style B6 fill:#fff4ce,stroke:#8a6d00,color:#000
+```
+
+Two traps make this easy to miss:
+
+- **A unit test does not prove that Azure can grant the action.** The test asserts the
+  composed string. It passes whether or not the operation exists. Run the `az` check as
+  well.
+- **A standard AKS cluster does not reproduce the failure.** `Authorizer.Check` in
+  `azure.go` returns NoOpinion for any user whose name starts with `system:`. Standard
+  node and controller identities stop there and never reach the mapping. Only a cluster
+  whose kubelet uses an Entra ID identity sends these requests to CheckAccess.
+
+### Two different subresource mechanisms
+
+Guard handles subresources in two separate places. They use separate lists and serve
+separate purposes. Do not confuse them.
+
+```mermaid
+flowchart TD
+    SAR["SubjectAccessReview<br/>resource + subresource"] --> C1
+    SAR --> D1
+
+    subgraph M1["Mechanism A: DataAction Id"]
+        direction TB
+        C1[getResourceAndAction] --> C2[securitySensitiveSubresources]
+        C2 --> C3["Id becomes<br/>resource/subresource/action<br/>MUST be registered by the RP"]
+    end
+
+    subgraph M2["Mechanism B: Subresource attribute"]
+        direction TB
+        D1[setAuthInfoSubresourceAttributes] --> D2["subresourceAttributeAllowlist<br/>flag: allow-subresource-type-check"]
+        D2 --> D3["Sent as an attribute.<br/>Id does not change."]
+    end
+
+    style C3 fill:#ffd6cc,stroke:#a33,color:#000
+    style D3 fill:#d4f5d4,stroke:#2a7,color:#000
+```
+
+| Mechanism                        | Code                               | Controlled by                                                              | Effect                                                                                      |
+| -------------------------------- | ---------------------------------- | -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| A. DataAction Id                 | `getResourceAndAction`             | `securitySensitiveSubresources`                                            | The subresource stays in the action string. The operation must exist in the registry.       |
+| B. Subresource attribute         | `setAuthInfoSubresourceAttributes` | `subresourceAttributeAllowlist` and `--azure.allow-subresource-type-check` | The subresource is sent next to the action as an attribute. The action string is unchanged. |
+
+Only mechanism A is subject to the registry invariant.
+
 ## Custom Resource Definition (CRD) Support
 
 Guard can authorize access to Custom Resources (CRDs) not defined in the standard Kubernetes API.
@@ -215,13 +334,16 @@ Create Azure role definitions with data actions for custom resources:
 
 ### Subresource Support
 
-Guard also supports subresource authorization when enabled:
+Guard can also send the subresource as an attribute next to the action:
 
 ```bash
 --azure.allow-subresource-type-check=true
 ```
 
-Supported subresources:
+This is the attribute mechanism only. It does not change the action string. For the
+action string itself, see [DataAction Mapping](#dataaction-mapping).
+
+Subresources on the attribute allowlist (`subresourceAttributeAllowlist`):
 
 - `pods/logs`
 - `pods/exec`
