@@ -190,8 +190,8 @@ flowchart TD
     D --> E[DataAction string]
     E --> F{Operation published by the RP?}
     F -->|Yes| G[Role can grant it.<br/>Allow or deny by assignment.]
-    F -->|No| H[Wildcard roles match only.<br/>Admin and Cluster Admin.]
-    H --> I[Denied for every<br/>least-privilege role]
+    F -->|No| H["Only a covering wildcard matches.<br/>Writer where it has resource/*,<br/>otherwise Admin and Cluster Admin."]
+    H --> I[Denied for Reader and<br/>for every custom role]
     I --> J[Customer cannot fix it.<br/>ARM refuses the action<br/>in a custom role.]
 
     style C fill:#fff4ce,stroke:#8a6d00,color:#000
@@ -214,12 +214,22 @@ If the operation is absent:
 - ARM refuses the action in a custom role definition. The error is
   `InvalidDataActionOrNotDataAction - does not match any of the actions supported by the
   providers`. The customer cannot grant the permission.
-- The built-in `Azure Kubernetes Service RBAC Reader` and `Writer` roles list leaf
-  actions, so they do not match the action either.
-- Only a role that carries a wildcard matches (`managedClusters/*`, `pods/*`,
-  `<resource>/*`). In practice this means Admin and Cluster Admin.
+- The built-in roles do not all enumerate leaf actions, so whether one still matches
+  depends on the resource, not on the role tier:
 
-Status of the actions used by the mapping, measured on 2026-08-13:
+  | Role            | DataActions | Wildcard | Leaf | Shape                                  |
+  | --------------- | ----------- | -------- | ---- | -------------------------------------- |
+  | `Reader`        | 31          | 0        | 31   | leaf only, every entry ends in `/read`  |
+  | `Writer`        | 35          | 24       | 11   | mostly `<resource>/*`, 11 leaf entries  |
+  | `Admin`         | 1           | 1        | 0    | `managedClusters/*`                     |
+  | `Cluster Admin` | 1           | 1        | 0    | `managedClusters/*`                     |
+
+  An Azure RBAC `*` spans `/`, so `managedClusters/pods/*` matches
+  `managedClusters/pods/attach/action`. `Reader` therefore never matches an
+  unregistered action, but `Writer` matches one whenever the parent resource is among
+  its 24 wildcards.
+
+Status of the actions used by the mapping, measured on 2026-08-18:
 
 | Action                                                                                | Registered |
 | ------------------------------------------------------------------------------------- | ---------- |
@@ -230,6 +240,21 @@ Status of the actions used by the mapping, measured on 2026-08-13:
 | `managedClusters/services/proxy/action`                                                | No         |
 | `managedClusters/nodes/proxy/action`                                                   | No         |
 | `managedClusters/certificates.k8s.io/certificatesigningrequests/nodeclient/action`     | No         |
+
+Which built-in role still matches each unregistered action:
+
+| Unregistered action                                    | `Reader` | `Writer`             | `Admin` / `Cluster Admin` |
+| ------------------------------------------------------ | -------- | -------------------- | ------------------------- |
+| `pods/{attach,portforward,proxy}/action`               | No       | Yes, via `pods/*`     | Yes                       |
+| `services/proxy/action`                                | No       | Yes, via `services/*` | Yes                       |
+| `nodes/proxy/action`                                   | No       | No                    | Yes                       |
+| `certificatesigningrequests/nodeclient/action`         | No       | No                    | Yes                       |
+
+`Writer` carries no `nodes/*` and no `certificates.k8s.io/certificatesigningrequests/*`
+entry, so those two actions are reachable only by widening to `Admin` or
+`Cluster Admin`. Where `Writer` does match, it matches through a wildcard that grants
+the whole resource, which is far more than the caller asked for. Neither outcome is a
+substitute for registering the operation.
 
 ### Review gate for a mapping change
 

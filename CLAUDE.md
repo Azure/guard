@@ -65,13 +65,22 @@ If the action is absent, the change is breaking and there is no customer-side fi
 - ARM rejects it in custom role definitions with `InvalidDataActionOrNotDataAction -
   does not match any of the actions supported by the providers`, so it cannot be
   granted explicitly.
-- Built-in `Azure Kubernetes Service RBAC Reader` and `Writer` enumerate leaf actions,
-  so they do not match it either. Only wildcard-bearing roles match
-  (`managedClusters/*`, `pods/*`, `<resource>/*`), i.e. Admin and Cluster Admin.
-- Net effect: denied for every principal on a least-privilege role, remediable only by
-  widening the role to a wildcard. The RP operations manifest must ship first.
+- The built-in roles are not uniformly leaf-enumerated, so check the specific resource.
+  `Reader` is leaf-only: all 31 of its DataActions end in `/read`, so it never matches.
+  `Writer` is mixed: 24 of its 35 DataActions are resource wildcards (`pods/*`,
+  `services/*`, `secrets/*`, ...) and 11 are leaf. `Admin` and `Cluster Admin` are a
+  single `managedClusters/*`. An Azure RBAC `*` spans `/`, so `pods/*` matches
+  `pods/attach/action`.
+- Reachability therefore follows the resource, not the role tier.
+  `pods/{attach,portforward,proxy}/action` and `services/proxy/action` fall under a
+  `Writer` wildcard, so `Writer` matches them. `nodes/proxy/action` and
+  `certificatesigningrequests/nodeclient/action` fall under no `Reader` or `Writer`
+  entry, so only `Admin` and `Cluster Admin` match.
+- Net effect: never grantable explicitly, never reachable from `Reader`, and otherwise
+  reachable only through a wildcard that grants far more than the caller needs. The RP
+  operations manifest must ship first.
 
-Registered as of 2026-08-13: `managedClusters/pods/{read,write,delete}`,
+Registered as of 2026-08-18: `managedClusters/pods/{read,write,delete}`,
 `managedClusters/pods/exec/action`,
 `managedClusters/certificates.k8s.io/certificatesigningrequests/{read,write,delete}`.
 NOT registered: `pods/{attach,portforward,proxy}/action`, `services/proxy/action`,
