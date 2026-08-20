@@ -100,12 +100,11 @@ type UserInfo struct {
 	useGroupUID   bool
 
 	tokenProvider TokenProvider
-
-	authMode   string
-	tenantID   string
-	resourceID string
-	region     string
-	lock       sync.RWMutex
+	authMode      string
+	tenantID      string
+	resourceID    string
+	region        string
+	lock          sync.RWMutex
 }
 
 func (u *UserInfo) getGroupIDs(ctx context.Context, userPrincipal string) ([]string, error) {
