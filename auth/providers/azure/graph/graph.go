@@ -29,6 +29,7 @@ import (
 	"sync"
 	"time"
 
+	errutils "go.kubeguard.dev/guard/util/error"
 	"go.kubeguard.dev/guard/util/httpclient"
 
 	"github.com/golang-jwt/jwt"
@@ -47,9 +48,16 @@ var (
 	expandedGroupsPerCall = 500
 	idtypClaim            = "idtyp"
 
+	// For getMemberGroups (user flow)
 	getMemberGroupsFailed = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "guard_azure_graph_failure_total",
 		Help: "Azure graph getMemberGroups call failed.",
+	})
+
+	// For getMemberObjects (service principal flow)
+	getMemberObjectsFailed = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "guard_azure_graph_sp_failure_total",
+		Help: "Azure graph getMemberObjects call failed.",
 	})
 
 	getMemberGroupsUsingARCOboServiceCounter = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -186,6 +194,50 @@ func (u *UserInfo) getExpandedGroups(ctx context.Context, ids []string) (*GroupL
 		return nil, errors.Wrapf(err, "failed to decode response for request %s", req.URL.Path)
 	}
 	return groups, nil
+}
+
+// GetGroupsForSP gets a list of all groups that the given service principal is part of.
+// Service principals live under /servicePrincipals rather than /users, so they cannot
+// reuse the getGroupIDs path used by GetGroups.
+func (u *UserInfo) GetGroupsForSP(ctx context.Context, spOID string, token string) ([]string, error) {
+	// ARC OBO has no verified support for SP tokens; it rejects them with a clear error.
+	if u.authMode == arcAuthMode {
+		return u.getMemberGroupsUsingARCOboService(ctx, token)
+	}
+
+	// Shallow copy of the base API URL, then append the SP member objects path.
+	spSearchURL := *u.apiURL
+	spSearchURL.Path = path.Join(spSearchURL.Path, fmt.Sprintf("/servicePrincipals/%s/getMemberObjects", spOID))
+
+	req, err := http.NewRequest(http.MethodPost, spSearchURL.String(), strings.NewReader(`{"securityEnabledOnly": false}`))
+	if err != nil {
+		return nil, errors.Wrap(err, "error creating SP getMemberObjects request")
+	}
+	req.Header = u.headers
+
+	resp, err := u.client.Do(req.WithContext(ctx))
+	if err != nil {
+		getMemberObjectsFailed.Inc()
+		return nil, errors.Wrap(err, "error listing users for service principal")
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	if resp.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(resp.Body)
+		klog.V(5).Infof("SP getMemberObjects failed for OID %s with status code %d", spOID, resp.StatusCode)
+		return nil, errors.Errorf("request %s failed with status code: %d and response: %s", spSearchURL.String(), resp.StatusCode, string(data))
+	}
+
+	objects := ObjectList{}
+	err = json.NewDecoder(resp.Body).Decode(&objects)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to decode SP getMemberObjects response")
+	}
+
+	klog.V(10).Infof("No of member objects returned for SP %s: %d", spOID, len(objects.Value))
+	return objects.Value, nil
 }
 
 // GetMemberGroupsUsingARCOboService gets a list of all groups that the given user principal is part of using the ARC OBO service
@@ -406,44 +458,6 @@ func (u *UserInfo) GetGroups(ctx context.Context, userPrincipal string, token st
 	}
 
 	return groupNames, nil
-}
-
-// GetSPMemberObjects resolves group membership for a service principal by
-// calling MS Graph /servicePrincipals/{oid}/getMemberObjects. Users are resolved
-// via /users/{upn}/getMemberGroups (see getGroupIDs); service principals require
-// the servicePrincipals resource, which is why this is a separate method.
-// Both share the same MS Graph base URL and the OBO token in u.headers.
-func (u *UserInfo) GetSPMemberObjects(ctx context.Context, spOID string) ([]string, error) {
-	// Shallow copy of the base API URL, then append the SP member objects path.
-	spSearchURL := *u.apiURL
-	spSearchURL.Path = path.Join(spSearchURL.Path, fmt.Sprintf("/servicePrincipals/%s/getMemberObjects", spOID))
-
-	req, err := http.NewRequest(http.MethodPost, spSearchURL.String(), strings.NewReader(`{"securityEnabledOnly": false}`))
-	if err != nil {
-		return nil, errors.Wrap(err, "error creating SP getMemberObjects request")
-	}
-	req.Header = u.headers
-
-	resp, err := u.client.Do(req.WithContext(ctx))
-	if err != nil {
-		return nil, errors.Wrap(err, "error calling SP getMemberObjects")
-	}
-	defer func() {
-		_ = resp.Body.Close()
-	}()
-
-	if resp.StatusCode != http.StatusOK {
-		data, _ := io.ReadAll(resp.Body)
-		return nil, errors.Errorf("request %s failed with status code: %d and response: %s", spSearchURL.String(), resp.StatusCode, string(data))
-	}
-
-	objects := ObjectList{}
-	err = json.NewDecoder(resp.Body).Decode(&objects)
-	if err != nil {
-		return nil, errors.Wrapf(err, "failed to decode SP getMemberObjects response")
-	}
-
-	return objects.Value, nil
 }
 
 func min(a, b int) int {

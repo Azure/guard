@@ -216,6 +216,15 @@ func serverSetup(loginResp string, loginStatus int, jwkResp, groupIds, groupList
 		_, _ = w.Write(groupIds)
 	}))
 
+	m.Post("/api/servicePrincipals/{oid}/getMemberObjects", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if len(groupStatus) > 0 {
+			w.WriteHeader(groupStatus[0])
+		} else {
+			w.WriteHeader(http.StatusOK)
+		}
+		_, _ = w.Write(groupIds)
+	}))
+
 	m.Post("/api/directoryObjects/getByIds", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(groupList)
@@ -456,8 +465,26 @@ func TestCheckAzureAuthenticationSPNWithOverage(t *testing.T) {
 		t.Fatalf("Error when creating signing key. reason : %v", err)
 	}
 
-	t.Run("SPN token with overage claim should proceed to SP overage resolution", func(t *testing.T) {
+	t.Run("SPN token with overage claim resolves groups via servicePrincipals getMemberObjects", func(t *testing.T) {
 		srv, client := getServerAndClient(t, signKey, loginResp, 3, true, false, ClientCredentialAuthMode)
+		client.Options.ResolveGroupMembershipOnlyOnOverageClaim = true
+		client.Options.UseGroupUID = true
+		defer srv.Close()
+
+		token, err := signKey.sign([]byte(fmt.Sprintf(accessTokenSPNWithOverage, srv.URL)))
+		if err != nil {
+			t.Fatalf("Error when signing token. reason: %v", err)
+		}
+
+		resp, err := client.Check(ctx, token)
+		assert.Nil(t, err)
+		assert.NotNil(t, resp)
+		assert.Equal(t, 3, len(resp.Groups))
+		assert.ElementsMatch(t, []string{"1", "2", "3"}, resp.Groups)
+	})
+
+	t.Run("SPN token with overage claim surfaces graph failure", func(t *testing.T) {
+		srv, client := getServerAndClient(t, signKey, loginResp, 3, true, false, ClientCredentialAuthMode, http.StatusInternalServerError)
 		client.Options.ResolveGroupMembershipOnlyOnOverageClaim = true
 		client.Options.UseGroupUID = true
 		defer srv.Close()

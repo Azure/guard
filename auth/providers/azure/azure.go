@@ -287,7 +287,7 @@ func (s Authenticator) Check(ctx context.Context, token string) (*authv1.UserInf
 			if oidErr != nil {
 				return nil, errors.Wrap(oidErr, "unable to get oid claim for service principal")
 			}
-			resp.Groups, err = s.graphClient.GetSPMemberObjects(ctx, spOID)
+			resp.Groups, err = s.graphClient.GetGroupsForSP(ctx, spOID, token)
 		} else {
 			resp.Groups, err = s.graphClient.GetGroups(ctx, resp.Username, token)
 		}
@@ -367,6 +367,8 @@ func getGroupsAndCheckOverage(claims claims) ([]string, bool, error) {
 		// may not be a distributed token
 		return nil, true, nil
 	}
+
+	klog.V(5).Infof("overage claim source endpoint: %s", ep.Endpoint)
 
 	// return true to proceed to call graph api
 	return nil, false, nil
