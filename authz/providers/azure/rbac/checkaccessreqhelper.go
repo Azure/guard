@@ -51,11 +51,13 @@ const (
 	PodsResource                = "pods"
 	ServicesResource            = "services"
 	NodesResource               = "nodes"
+	ServiceAccountsResource     = "serviceaccounts"
 	CustomResources             = "customresources"
 	ProxySubresource            = "proxy"
 	AttachSubresource           = "attach"
 	PortForwardSubresource      = "portforward"
 	ExecSubresource             = "exec"
+	TokenSubresource            = "token"
 	ReadVerb                    = "read"
 	WriteVerb                   = "write"
 	DeleteVerb                  = "delete"
@@ -266,6 +268,15 @@ func getActionName(verb string) string {
 // subresources are granted separately from base read/write in the upstream
 // roles, so they are mapped to their own DataAction rather than to
 // <resource>/read or <resource>/write.
+//
+// serviceaccounts/token is the TokenRequest API. Upstream lists it as its own
+// resource in the aggregate-to-edit ClusterRole
+// ("create" on "serviceaccounts/token", separate from the write rule on
+// "serviceaccounts"), because issuing a bearer token for a ServiceAccount is a
+// credential-minting operation rather than an update of the ServiceAccount
+// object. Collapsing it into serviceaccounts/write would grant token issuance
+// to every principal that can create or update ServiceAccount objects, which
+// upstream Kubernetes RBAC does not do.
 var securitySensitiveSubresources = map[string]map[string]struct{}{
 	PodsResource: {
 		ExecSubresource:        {},
@@ -278,6 +289,9 @@ var securitySensitiveSubresources = map[string]map[string]struct{}{
 	},
 	NodesResource: {
 		ProxySubresource: {},
+	},
+	ServiceAccountsResource: {
+		TokenSubresource: {},
 	},
 }
 
