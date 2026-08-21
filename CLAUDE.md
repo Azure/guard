@@ -36,6 +36,65 @@ Do NOT commit if any check fails.
 - **Client cert**: `-o Azure` org required for mTLS
 - **Base image for testing**: Use `alpine:3.20` not `distroless/static` - needs CA certificates
 - **Azure SDK**: `BearerTokenPolicy` requires HTTPS for auth tokens
+- **DataAction strings**: Guard does not own the action namespace. Every action it emits
+  must already be published by the resource provider, or it is deniable but not
+  grantable (see below)
+- **`system:` users skip Azure RBAC entirely**: `authz/providers/azure/azure.go` returns
+  NoOpinion for any user whose name starts with `system:`, so node and controller
+  identities on a standard AKS cluster never reach the DataAction mapping
+
+## Changing the DataAction Mapping
+
+Full explanation with diagrams: `authz/providers/azure/README.md`, section
+"DataAction Mapping". Keep the two in sync; this is the short operational form.
+
+`getResourceAndAction` / `getDataActions` in
+`authz/providers/azure/rbac/checkaccessreqhelper.go` compose the DataAction strings that
+Azure RBAC evaluates. A string Guard invents is only authorizable if the RP already
+publishes the matching operation.
+
+**Verify every new action before merging:**
+
+```bash
+az provider operation show --namespace Microsoft.ContainerService -o json \
+  | jq -r '.. | objects | select(.name? // "" | test("<action-suffix>")) | .name'
+```
+
+If the action is absent, the change is breaking and there is no customer-side fix:
+
+- ARM rejects it in custom role definitions with `InvalidDataActionOrNotDataAction -
+  does not match any of the actions supported by the providers`, so it cannot be
+  granted explicitly.
+- The built-in roles are not uniformly leaf-enumerated, so check the specific resource.
+  `Reader` is leaf-only: all 31 of its DataActions end in `/read`, so it never matches.
+  `Writer` is mixed: 24 of its 35 DataActions are resource wildcards (`pods/*`,
+  `services/*`, `secrets/*`, ...) and 11 are leaf. `Admin` and `Cluster Admin` are a
+  single `managedClusters/*`. An Azure RBAC `*` spans `/`, so `pods/*` matches
+  `pods/attach/action`.
+- Reachability therefore follows the resource, not the role tier.
+  `pods/{attach,portforward,proxy}/action` and `services/proxy/action` fall under a
+  `Writer` wildcard, so `Writer` matches them. `nodes/proxy/action` and
+  `certificatesigningrequests/nodeclient/action` fall under no `Reader` or `Writer`
+  entry, so only `Admin` and `Cluster Admin` match.
+- Net effect: never grantable explicitly, never reachable from `Reader`, and otherwise
+  reachable only through a wildcard that grants far more than the caller needs. The RP
+  operations manifest must ship first.
+
+Registered as of 2026-08-18: `managedClusters/pods/{read,write,delete}`,
+`managedClusters/pods/exec/action`,
+`managedClusters/certificates.k8s.io/certificatesigningrequests/{read,write,delete}`.
+NOT registered: `pods/{attach,portforward,proxy}/action`, `services/proxy/action`,
+`nodes/proxy/action`, `certificatesigningrequests/nodeclient/action`.
+
+Two things that make this easy to miss in review:
+
+- **A passing unit test proves nothing here.** Asserting the composed string succeeds
+  whether or not Azure can grant it. Pair every mapping change with the `az` check.
+- **Standard clusters cannot reproduce it.** Splitting a subresource out of its parent
+  action flips previously-allowed requests to denied, but only for principals that
+  actually reach the mapping. Clusters whose kubelets authenticate with an Entra ID
+  identity instead of a bootstrap token are the ones that break; `system:`-prefixed
+  identities mask the regression everywhere else.
 
 ## Commands
 
