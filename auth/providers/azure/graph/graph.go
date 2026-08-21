@@ -201,7 +201,11 @@ func (u *UserInfo) getExpandedGroups(ctx context.Context, ids []string) (*GroupL
 func (u *UserInfo) GetGroupsForSP(ctx context.Context, spOID string, token string) ([]string, error) {
 	// ARC OBO has no verified support for SP tokens; it rejects them with a clear error.
 	if u.authMode == arcAuthMode {
-		return u.getMemberGroupsUsingARCOboService(ctx, token)
+		groupIds, err := u.getMemberGroupsUsingARCOboService(ctx, token)
+		if err != nil {
+			return nil, err
+		}
+		return groupIds, nil
 	}
 
 	// Shallow copy of the base API URL, then append the SP member objects path.
@@ -217,7 +221,7 @@ func (u *UserInfo) GetGroupsForSP(ctx context.Context, spOID string, token strin
 	resp, err := u.client.Do(req.WithContext(ctx))
 	if err != nil {
 		getMemberObjectsFailed.Inc()
-		return nil, errors.Wrap(err, "error listing users for service principal")
+		return nil, errors.Wrap(err, "error getting member objects for service principal")
 	}
 	defer func() {
 		_ = resp.Body.Close()
@@ -235,7 +239,7 @@ func (u *UserInfo) GetGroupsForSP(ctx context.Context, spOID string, token strin
 		return nil, errors.Wrapf(err, "failed to decode SP getMemberObjects response")
 	}
 
-	klog.V(10).Infof("No of member objects returned for SP %s: %d", spOID, len(objects.Value))
+	klog.V(10).Infof("Number of member objects returned for SP %s: %d", spOID, len(objects.Value))
 	return objects.Value, nil
 }
 
