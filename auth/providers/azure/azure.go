@@ -368,8 +368,6 @@ func getGroupsAndCheckOverage(claims claims) ([]string, bool, error) {
 		return nil, true, nil
 	}
 
-	klog.V(5).Infof("overage claim source endpoint: %s", ep.Endpoint)
-
 	// return true to proceed to call graph api
 	return nil, false, nil
 }
