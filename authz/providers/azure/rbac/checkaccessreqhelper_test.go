@@ -501,6 +501,60 @@ func Test_getDataActions(t *testing.T) {
 			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/nodes/proxy/action"}, IsDataAction: true}},
 		},
 
+		// serviceaccounts/token is the TokenRequest API. Upstream Kubernetes
+		// lists it as its own resource in the aggregate-to-edit ClusterRole,
+		// separate from the write rule on serviceaccounts, so it must produce a
+		// distinct DataAction instead of collapsing onto serviceaccounts/write.
+		{
+			"serviceAccountsTokenCreateAKS",
+			args{
+				isWildcardTest: false,
+				subRevReq: &authzv1.SubjectAccessReviewSpec{
+					ResourceAttributes: &authzv1.ResourceAttributes{Group: "", Resource: "serviceaccounts", Subresource: "token", Version: "v1", Name: "test", Verb: "create"},
+				}, clusterType: aksClusterType,
+			},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/serviceaccounts/token/action"}, IsDataAction: true}},
+		},
+
+		{
+			"serviceAccountsTokenCreateFleet",
+			args{
+				isWildcardTest: false,
+				subRevReq: &authzv1.SubjectAccessReviewSpec{
+					ResourceAttributes: &authzv1.ResourceAttributes{Group: "", Resource: "serviceaccounts", Subresource: "token", Version: "v1", Name: "test", Verb: "create"},
+				}, clusterType: "fleet",
+			},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "fleet/serviceaccounts/token/action"}, IsDataAction: true}},
+		},
+
+		// Writing the ServiceAccount object itself is unchanged: it must still
+		// map to serviceaccounts/write, so the change does not over-restrict
+		// ordinary ServiceAccount CRUD.
+		{
+			"serviceAccountsCreateWithoutSubresourceUnchanged",
+			args{
+				isWildcardTest: false,
+				subRevReq: &authzv1.SubjectAccessReviewSpec{
+					ResourceAttributes: &authzv1.ResourceAttributes{Group: "", Resource: "serviceaccounts", Version: "v1", Name: "test", Verb: "create"},
+				}, clusterType: aksClusterType,
+			},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/serviceaccounts/write"}, IsDataAction: true}},
+		},
+
+		// The impersonate verb already encodes the privileged operation in the
+		// action name and has no subresource, so it keeps resolving through the
+		// verb mapping rather than the subresource table.
+		{
+			"serviceAccountsImpersonateUnchanged",
+			args{
+				isWildcardTest: false,
+				subRevReq: &authzv1.SubjectAccessReviewSpec{
+					ResourceAttributes: &authzv1.ResourceAttributes{Group: "", Resource: "serviceaccounts", Version: "v1", Name: "test", Verb: "impersonate"},
+				}, clusterType: aksClusterType,
+			},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/serviceaccounts/impersonate/action"}, IsDataAction: true}},
+		},
+
 		// A non-sensitive pods subresource (e.g. status) must still collapse to
 		// the base read action so this fix does not over-restrict legitimate reads.
 		{
