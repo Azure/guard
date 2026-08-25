@@ -194,7 +194,7 @@ func TestGetGroupIDs(t *testing.T) {
 		ts, u := getAPIServerAndUserInfo(http.StatusOK, validBody)
 		defer ts.Close()
 
-		groups, err := u.getGroupIDs(ctx, "john.michael.kane@yacht.io")
+		groups, err := u.getGroupIDs(ctx, "john.michael.kane@yacht.io", false)
 		if err != nil {
 			t.Errorf("Should not have gotten error: %s", err)
 		}
@@ -206,7 +206,7 @@ func TestGetGroupIDs(t *testing.T) {
 		ts, u := getAPIServerAndUserInfo(http.StatusInternalServerError, "shutdown")
 		defer ts.Close()
 
-		groups, err := u.getGroupIDs(ctx, "alexander.conklin@cia.gov")
+		groups, err := u.getGroupIDs(ctx, "alexander.conklin@cia.gov", false)
 		if err == nil {
 			t.Error("Should have gotten error")
 		}
@@ -224,7 +224,7 @@ func TestGetGroupIDs(t *testing.T) {
 			groupsPerCall: expandedGroupsPerCall,
 		}
 
-		groups, err := u.getGroupIDs(ctx, "richard.webb@cia.gov")
+		groups, err := u.getGroupIDs(ctx, "richard.webb@cia.gov", false)
 		if err == nil {
 			t.Error("Should have gotten error")
 		}
@@ -236,7 +236,7 @@ func TestGetGroupIDs(t *testing.T) {
 		ts, u := getAPIServerAndUserInfo(http.StatusOK, "{bad_json")
 		defer ts.Close()
 
-		groups, err := u.getGroupIDs(ctx, "nicky.parsons@cia.gov")
+		groups, err := u.getGroupIDs(ctx, "nicky.parsons@cia.gov", false)
 		if err == nil {
 			t.Error("Should have gotten error")
 		}
@@ -489,7 +489,7 @@ func TestGetMemberGroupsUsingARCOboService(t *testing.T) {
 	})
 }
 
-func TestGetGroupsForSP(t *testing.T) {
+func TestGetGroupsForServicePrincipal(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("arc auth mode routes to the arc obo service", func(t *testing.T) {
@@ -516,7 +516,7 @@ func TestGetGroupsForSP(t *testing.T) {
 			t.Fatalf("Error when generating token. Error:%+v", err)
 		}
 
-		groups, err := u.GetGroupsForSP(ctx, "spn-oid-123", tokenstring)
+		groups, err := u.GetGroups(ctx, "spn-oid-123", tokenstring, true)
 		if err == nil {
 			t.Fatal("Should have gotten error")
 		}
@@ -544,16 +544,17 @@ func TestGetGroupsForSP(t *testing.T) {
 			headers:       http.Header{},
 			expires:       time.Now().Add(time.Hour),
 			groupsPerCall: expandedGroupsPerCall,
+			useGroupUID:   true,
 		}
 
-		groups, err := u.GetGroupsForSP(ctx, "spn-oid-123", "")
+		groups, err := u.GetGroups(ctx, "spn-oid-123", "", true)
 		if err != nil {
 			t.Fatalf("Should not have gotten error: %s", err)
 		}
 		if gotMethod != http.MethodPost {
 			t.Errorf("Expected POST, got %s", gotMethod)
 		}
-		if gotPath != "/v1.0/servicePrincipals/spn-oid-123/getMemberObjects" {
+		if gotPath != "/v1.0/servicePrincipals/spn-oid-123/getMemberGroups" {
 			t.Errorf("Unexpected request path: %s", gotPath)
 		}
 		if len(groups) != 3 {
@@ -570,7 +571,7 @@ func TestGetGroupsForSP(t *testing.T) {
 		ts, u := getAPIServerAndUserInfo(http.StatusInternalServerError, "shutdown")
 		defer ts.Close()
 
-		groups, err := u.GetGroupsForSP(ctx, "spn-oid-123", "")
+		groups, err := u.getGroupIDs(ctx, "spn-oid-123", true)
 		if err == nil {
 			t.Fatal("Should have gotten error")
 		}
@@ -592,7 +593,7 @@ func TestGetGroupsForSP(t *testing.T) {
 			groupsPerCall: expandedGroupsPerCall,
 		}
 
-		groups, err := u.GetGroupsForSP(ctx, "spn-oid-123", "")
+		groups, err := u.getGroupIDs(ctx, "spn-oid-123", true)
 		if err == nil {
 			t.Fatal("Should have gotten error")
 		}
@@ -605,14 +606,14 @@ func TestGetGroupsForSP(t *testing.T) {
 		ts, u := getAPIServerAndUserInfo(http.StatusOK, "{bad_json")
 		defer ts.Close()
 
-		groups, err := u.GetGroupsForSP(ctx, "spn-oid-123", "")
+		groups, err := u.getGroupIDs(ctx, "spn-oid-123", true)
 		if err == nil {
 			t.Fatal("Should have gotten error")
 		}
 		if groups != nil {
 			t.Error("Group list should be nil")
 		}
-		if !strings.Contains(err.Error(), "failed to decode SP getMemberObjects response") {
+		if !strings.Contains(err.Error(), "failed to decode response for request") {
 			t.Errorf("Expected decode error, got: %s", err.Error())
 		}
 	})
@@ -660,7 +661,7 @@ func TestGetGroups(t *testing.T) {
 	}
 	defer ts.Close()
 
-	groups, err := u.GetGroups(ctx, "blackbriar@cia.gov", "")
+	groups, err := u.GetGroups(ctx, "blackbriar@cia.gov", "", false)
 	if err != nil {
 		t.Errorf("Should not have gotten error: %s", err)
 	}
@@ -678,7 +679,7 @@ func TestGetGroups(t *testing.T) {
 	}
 	defer ts.Close()
 
-	groups, err = uWithGroupID.GetGroups(ctx, "blackbriar@cia.gov", "")
+	groups, err = uWithGroupID.GetGroups(ctx, "blackbriar@cia.gov", "", false)
 	if err != nil {
 		t.Errorf("Should not have gotten error: %s", err)
 	}
@@ -754,7 +755,7 @@ func TestGetGroupsPaging(t *testing.T) {
 	defer ts.Close()
 
 	ctx := context.Background()
-	groups, err := u.GetGroups(ctx, "blackbriar@cia.gov", "")
+	groups, err := u.GetGroups(ctx, "blackbriar@cia.gov", "", false)
 	if err != nil {
 		t.Errorf("Should not have gotten error: %s", err)
 	}
