@@ -28,6 +28,7 @@ import (
 	"go.kubeguard.dev/guard/auth"
 	"go.kubeguard.dev/guard/auth/providers/azure/graph"
 	azureutils "go.kubeguard.dev/guard/util/azure"
+	errutils "go.kubeguard.dev/guard/util/error"
 
 	"github.com/Azure/go-autorest/autorest/azure"
 	"github.com/coreos/go-oidc"
@@ -275,13 +276,31 @@ func (s Authenticator) Check(ctx context.Context, token string) (*authv1.UserInf
 			resp.Groups = groups
 			return resp, nil
 		}
+
+		// Service principal token with an overage claim (>200 groups) while SP
+		// group resolution is switched off: short-circuit instead of letting the
+		// user flow fail with a cryptic AADSTS7000113.
+		//
+		// StatusOK: K8s webhook authenticator only reads and logs TokenReview
+		// Status.Error on HTTP 200. Non-200 is treated as a transport error and
+		// the message is discarded. We need this error to surface in API server
+		// logs so operators can diagnose why the SPN was rejected.
+		if !s.Options.EnableSPGroupResolution && isAppToken(claims) {
+			return nil, errutils.WithCode(
+				fmt.Errorf(
+					"service principal with group membership exceeding 200 is not supported. "+
+						"See https://learn.microsoft.com/en-us/azure/aks/kubelogin-authentication#kubelogin-authentication-in-aks-limitations",
+				),
+				http.StatusOK,
+			)
+		}
 	}
 	if !s.Options.SkipGroupMembershipResolution {
 		if err := s.graphClient.RefreshToken(ctx, token); err != nil {
 			return nil, err
 		}
 		principal := resp.Username
-		isServicePrincipal := isAppToken(claims)
+		isServicePrincipal := s.Options.EnableSPGroupResolution && isAppToken(claims)
 		if isServicePrincipal {
 			// Service principals are resolved by object ID against the
 			// /servicePrincipals resource.

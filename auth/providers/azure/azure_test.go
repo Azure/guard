@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"go.kubeguard.dev/guard/auth/providers/azure/graph"
+	errutils "go.kubeguard.dev/guard/util/error"
 
 	"github.com/coreos/go-oidc"
 	"github.com/go-chi/chi/v5"
@@ -469,6 +470,7 @@ func TestCheckAzureAuthenticationSPNWithOverage(t *testing.T) {
 		srv, client := getServerAndClient(t, signKey, loginResp, 3, true, false, ClientCredentialAuthMode)
 		client.Options.ResolveGroupMembershipOnlyOnOverageClaim = true
 		client.Options.UseGroupUID = true
+		client.Options.EnableSPGroupResolution = true
 		defer srv.Close()
 
 		token, err := signKey.sign([]byte(fmt.Sprintf(accessTokenSPNWithOverage, srv.URL)))
@@ -483,10 +485,32 @@ func TestCheckAzureAuthenticationSPNWithOverage(t *testing.T) {
 		assert.ElementsMatch(t, []string{"1", "2", "3"}, resp.Groups)
 	})
 
+	t.Run("SPN token with overage claim is rejected when SP group resolution is disabled", func(t *testing.T) {
+		srv, client := getServerAndClient(t, signKey, loginResp, 3, true, false, ClientCredentialAuthMode)
+		client.Options.ResolveGroupMembershipOnlyOnOverageClaim = true
+		client.Options.UseGroupUID = true
+		defer srv.Close()
+
+		token, err := signKey.sign([]byte(fmt.Sprintf(accessTokenSPNWithOverage, srv.URL)))
+		if err != nil {
+			t.Fatalf("Error when signing token. reason: %v", err)
+		}
+
+		resp, err := client.Check(ctx, token)
+		assert.NotNil(t, err)
+		assert.Nil(t, resp)
+		assert.Contains(t, err.Error(), "service principal with group membership exceeding 200 is not supported")
+
+		codeErr, ok := err.(errutils.HttpStatusCode)
+		assert.True(t, ok, "error should carry an http status code")
+		assert.Equal(t, http.StatusOK, codeErr.Code())
+	})
+
 	t.Run("SPN token with overage claim surfaces graph failure", func(t *testing.T) {
 		srv, client := getServerAndClient(t, signKey, loginResp, 3, true, false, ClientCredentialAuthMode, http.StatusInternalServerError)
 		client.Options.ResolveGroupMembershipOnlyOnOverageClaim = true
 		client.Options.UseGroupUID = true
+		client.Options.EnableSPGroupResolution = true
 		defer srv.Close()
 
 		token, err := signKey.sign([]byte(fmt.Sprintf(accessTokenSPNWithOverage, srv.URL)))
