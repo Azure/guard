@@ -251,13 +251,32 @@ func TestGetDataActionsV2_Success(t *testing.T) {
 		},
 	}
 
-	actions, err := getDataActionsV2(ctx, request, managedClusters, false, false)
+	actions, err := getDataActionsV2(ctx, request, managedClusters, false, false, false)
 
 	assert.NoError(t, err)
 	assert.NotEmpty(t, actions)
 	assert.Contains(t, actions[0].Id, "pods")
 	assert.Contains(t, actions[0].Id, "read")
 	assert.True(t, actions[0].IsDataAction)
+}
+
+func TestGetDataActionsV2_CSRNodeClientEnforced(t *testing.T) {
+	request := &authzv1.SubjectAccessReviewSpec{
+		ResourceAttributes: &authzv1.ResourceAttributes{
+			Group:       "certificates.k8s.io",
+			Verb:        "create",
+			Resource:    "certificatesigningrequests",
+			Subresource: "nodeclient",
+		},
+	}
+
+	actions, err := getDataActionsV2(context.Background(), request, managedClusters, false, false, true)
+
+	assert.NoError(t, err)
+	if assert.Len(t, actions, 1) {
+		assert.Equal(t, "Microsoft.ContainerService/managedClusters/certificates.k8s.io/certificatesigningrequests/nodeclient/action", actions[0].Id)
+		assert.True(t, actions[0].IsDataAction)
+	}
 }
 
 func TestPerformCheckAccessV2_Success(t *testing.T) {

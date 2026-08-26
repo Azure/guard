@@ -108,6 +108,7 @@ type AccessInfo struct {
 	allowNonResDiscoveryPathAccess         bool
 	allowCustomResourceTypeCheck           bool
 	allowSubresourceTypeCheck              bool
+	enforceCSRNodeClientDataAction         bool
 	useManagedNamespaceResourceScopeFormat bool
 	useNamespaceResourceScopeFormat        bool
 	httpClientRetryCount                   int
@@ -200,6 +201,7 @@ func newAccessInfo(tokenProvider graph.TokenProvider, rbacURL *url.URL, opts aut
 		allowNonResDiscoveryPathAccess:         opts.AllowNonResDiscoveryPathAccess,
 		allowCustomResourceTypeCheck:           opts.AllowCustomResourceTypeCheck,
 		allowSubresourceTypeCheck:              opts.AllowSubresourceTypeCheck,
+		enforceCSRNodeClientDataAction:         opts.EnforceCSRNodeClientDataAction,
 		useManagedNamespaceResourceScopeFormat: opts.UseManagedNamespaceResourceScopeFormat,
 		useNamespaceResourceScopeFormat:        opts.UseNamespaceResourceScopeFormat,
 		httpClientRetryCount:                   authopts.HttpClientRetryCount,
@@ -315,7 +317,7 @@ func (a *AccessInfo) ShouldSkipAuthzCheckForNonAADUsers() bool {
 func (a *AccessInfo) GetResultFromCache(ctx context.Context, request *authzv1.SubjectAccessReviewSpec, store authz.Store) (bool, CacheResult) {
 	log := klog.FromContext(ctx)
 	var result CacheResult
-	key := getResultCacheKey(request, a.allowSubresourceTypeCheck)
+	key := getResultCacheKey(request, a.allowSubresourceTypeCheck, a.enforceCSRNodeClientDataAction)
 	log.V(10).Info("Cache search", "key", key)
 	found, err := store.Get(key, &result)
 	if err != nil {
@@ -348,7 +350,7 @@ func (a *AccessInfo) SkipAuthzCheck(request *authzv1.SubjectAccessReviewSpec) bo
 
 func (a *AccessInfo) SetResultInCache(ctx context.Context, request *authzv1.SubjectAccessReviewSpec, result CacheResult, store authz.Store) error {
 	log := klog.FromContext(ctx)
-	key := getResultCacheKey(request, a.allowSubresourceTypeCheck)
+	key := getResultCacheKey(request, a.allowSubresourceTypeCheck, a.enforceCSRNodeClientDataAction)
 	log.V(10).Info("Cache set", "key", key, "allowed", result.Allowed, "reason", result.Reason)
 	return store.Set(key, result)
 }
@@ -491,7 +493,7 @@ func (a *AccessInfo) CheckAccess(ctx context.Context, request *authzv1.SubjectAc
 	// V1 API path (legacy)
 	log.Info("Using CheckAccess v1 API")
 
-	checkAccessBodies, err := prepareCheckAccessRequestBody(ctx, request, a.clusterType, a.azureResourceId, a.useNamespaceResourceScopeFormat, a.allowCustomResourceTypeCheck, a.allowSubresourceTypeCheck)
+	checkAccessBodies, err := prepareCheckAccessRequestBody(ctx, request, a.clusterType, a.azureResourceId, a.useNamespaceResourceScopeFormat, a.allowCustomResourceTypeCheck, a.allowSubresourceTypeCheck, a.enforceCSRNodeClientDataAction)
 	if err != nil {
 		return nil, fmt.Errorf("error in preparing check access request: %w", err)
 	}
@@ -550,7 +552,7 @@ func (a *AccessInfo) CheckAccess(ctx context.Context, request *authzv1.SubjectAc
 			return nil, fmt.Errorf("Failed to build fleet manager check access URL: %w", err)
 		}
 
-		bodiesForFleetRBAC, err := prepareCheckAccessRequestBody(ctx, request, fleetMembers, a.fleetManagerResourceId, false, a.allowCustomResourceTypeCheck, a.allowSubresourceTypeCheck)
+		bodiesForFleetRBAC, err := prepareCheckAccessRequestBody(ctx, request, fleetMembers, a.fleetManagerResourceId, false, a.allowCustomResourceTypeCheck, a.allowSubresourceTypeCheck, a.enforceCSRNodeClientDataAction)
 		if err != nil {
 			return nil, fmt.Errorf("Failed to prepare check access request for fleet manager: %w", err)
 		}

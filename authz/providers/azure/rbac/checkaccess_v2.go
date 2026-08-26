@@ -278,7 +278,7 @@ func (a *AccessInfo) checkAccessV2(ctx context.Context, request *authzv1.Subject
 	log.V(7).Info("Extracted user identity for v2", "userOid", userOid, "groupsCount", len(groups))
 
 	// Prepare actions list from request (same logic as v1 but get action IDs)
-	actions, err := getDataActionsV2(ctx, request, a.clusterType, a.allowCustomResourceTypeCheck, a.allowSubresourceTypeCheck)
+	actions, err := getDataActionsV2(ctx, request, a.clusterType, a.allowCustomResourceTypeCheck, a.allowSubresourceTypeCheck, a.enforceCSRNodeClientDataAction)
 	if err != nil {
 		return nil, fmt.Errorf("error preparing v2 actions list: %w", err)
 	}
@@ -328,7 +328,7 @@ func (a *AccessInfo) checkAccessV2(ctx context.Context, request *authzv1.Subject
 		// Generate fleet-specific actions using fleetMembers cluster type
 		// This ensures actions like "Microsoft.ContainerService/fleets/members/pods/read"
 		// are used instead of "Microsoft.ContainerService/managedClusters/pods/read"
-		fleetMemberActions, err := getDataActionsV2(ctx, request, fleetMembers, a.allowCustomResourceTypeCheck, a.allowSubresourceTypeCheck)
+		fleetMemberActions, err := getDataActionsV2(ctx, request, fleetMembers, a.allowCustomResourceTypeCheck, a.allowSubresourceTypeCheck, a.enforceCSRNodeClientDataAction)
 		if err != nil {
 			return nil, fmt.Errorf("error preparing fleet actions list: %w", err)
 		}
@@ -372,8 +372,8 @@ func (a *AccessInfo) checkAccessV2(ctx context.Context, request *authzv1.Subject
 // IsDataAction and any subresource attributes are preserved for the PDP request
 // (see buildAuthorizationRequestV2 / toActionInfos). Dropping IsDataAction makes
 // PDP evaluate Kubernetes RBAC actions as management actions and deny every check.
-func getDataActionsV2(ctx context.Context, request *authzv1.SubjectAccessReviewSpec, clusterType string, allowCustomResourceTypeCheck bool, allowSubresourceTypeCheck bool) ([]azureutils.AuthorizationActionInfo, error) {
-	return getDataActions(ctx, request, clusterType, allowCustomResourceTypeCheck, allowSubresourceTypeCheck)
+func getDataActionsV2(ctx context.Context, request *authzv1.SubjectAccessReviewSpec, clusterType string, allowCustomResourceTypeCheck bool, allowSubresourceTypeCheck bool, enforceCSRNodeClientDataAction bool) ([]azureutils.AuthorizationActionInfo, error) {
+	return getDataActions(ctx, request, clusterType, allowCustomResourceTypeCheck, allowSubresourceTypeCheck, enforceCSRNodeClientDataAction)
 }
 
 // buildResourceIDForV2 constructs and validates a resource ID for CheckAccess v2 API.
