@@ -267,6 +267,8 @@ func (s Authenticator) Check(ctx context.Context, token string) (*authv1.UserInf
 		return nil, err
 	}
 
+	isServicePrincipal := isAppToken(claims)
+
 	if s.Options.ResolveGroupMembershipOnlyOnOverageClaim {
 		groups, skipGraphAPI, err := getGroupsAndCheckOverage(claims)
 		if err != nil {
@@ -285,7 +287,7 @@ func (s Authenticator) Check(ctx context.Context, token string) (*authv1.UserInf
 		// Status.Error on HTTP 200. Non-200 is treated as a transport error and
 		// the message is discarded. We need this error to surface in API server
 		// logs so operators can diagnose why the SPN was rejected.
-		if !s.Options.EnableSPGroupResolution && isAppToken(claims) {
+		if !s.Options.EnableSPGroupResolution && isServicePrincipal {
 			return nil, errutils.WithCode(
 				fmt.Errorf(
 					"service principal with group membership exceeding 200 is not supported. "+
@@ -300,7 +302,6 @@ func (s Authenticator) Check(ctx context.Context, token string) (*authv1.UserInf
 			return nil, err
 		}
 		principal := resp.Username
-		isServicePrincipal := s.Options.EnableSPGroupResolution && isAppToken(claims)
 		if isServicePrincipal {
 			// Service principals are resolved by object ID against the
 			// /servicePrincipals resource.
