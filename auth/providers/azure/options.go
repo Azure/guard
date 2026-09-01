@@ -52,6 +52,7 @@ type Options struct {
 	PoPTokenValidityDuration                 time.Duration
 	ResolveGroupMembershipOnlyOnOverageClaim bool
 	SkipGroupMembershipResolution            bool
+	EnableSPGroupResolution                  bool
 	VerifyClientID                           bool
 	ResourceId                               string
 	AzureRegion                              string
@@ -80,6 +81,7 @@ func (o *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.BoolVar(&o.ResolveGroupMembershipOnlyOnOverageClaim, "azure.graph-call-on-overage-claim", o.ResolveGroupMembershipOnlyOnOverageClaim, "set to true to resolve group membership only when overage claim is present. setting to false will always call graph api to resolve group membership")
 	fs.BoolVar(&o.VerifyClientID, "azure.verify-clientID", o.VerifyClientID, "set to true to validate token's audience claim matches clientID")
 	fs.BoolVar(&o.SkipGroupMembershipResolution, "azure.skip-group-membership-resolution", false, "when set to true, this will bypass getting group membership from graph api")
+	fs.BoolVar(&o.EnableSPGroupResolution, "azure.enable-sp-group-resolution", false, "when set to true, group membership of service principal (application) tokens is resolved via the servicePrincipals graph endpoint. when false, service principal tokens carrying an overage claim are rejected")
 	// resource id and region are needed to retrieve user's security group info via Arc obo service
 	fs.StringVar(&o.ResourceId, "azure.auth-resource-id", "", "azure cluster resource id (//subscription/<subName>/resourcegroups/<RGname>/providers/Microsoft.Kubernetes/connectedClusters/<clustername> for connectedk8s) used for making getMemberGroups to ARC OBO service")
 	fs.StringVar(&o.AzureRegion, "azure.region", "", "region where cluster is deployed")
