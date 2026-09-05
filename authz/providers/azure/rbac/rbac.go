@@ -353,12 +353,61 @@ func (a *AccessInfo) SetResultInCache(ctx context.Context, request *authzv1.Subj
 	return store.Set(key, result)
 }
 
-func (a *AccessInfo) AllowNonResPathDiscoveryAccess(request *authzv1.SubjectAccessReviewSpec) bool {
-	if request.NonResourceAttributes != nil && a.allowNonResDiscoveryPathAccess && strings.EqualFold(request.NonResourceAttributes.Verb, "get") {
-		path := strings.ToLower(request.NonResourceAttributes.Path)
-		if strings.HasPrefix(path, "/api") || strings.HasPrefix(path, "/openapi") || strings.HasPrefix(path, "/version") || strings.HasPrefix(path, "/healthz") {
+// discoveryExactPaths and discoveryPrefixPaths together reproduce the non-resource
+// URLs of the upstream Kubernetes "system:discovery" ClusterRole
+// (plugin/pkg/auth/authorizer/rbac/bootstrappolicy/policy.go), which upstream binds
+// to the system:authenticated group. Upstream evaluates a rule URL ending in "*" as
+// a prefix match with the "*" trimmed and every other rule URL as an exact string
+// match (rbacv1.NonResourceURLMatches), so "/api/*" contributes the "/api/" prefix
+// while "/healthz" and "/version" match only themselves. Guard must not exempt
+// anything outside this set, so paths such as "/healthz/etcd" or "/apiz" get a
+// regular Azure RBAC check instead (MSRC 132991).
+var discoveryExactPaths = map[string]struct{}{
+	"/api":      {},
+	"/apis":     {},
+	"/healthz":  {},
+	"/livez":    {},
+	"/openapi":  {},
+	"/readyz":   {},
+	"/version":  {},
+	"/version/": {},
+}
+
+// discoveryPrefixPaths are the upstream "/api/*", "/apis/*" and "/openapi/*" rules
+// with the trailing "*" trimmed, matched as prefixes exactly as upstream does.
+var discoveryPrefixPaths = []string{"/api/", "/apis/", "/openapi/"}
+
+// isNonResourceDiscoveryPath reports whether the lowercased non-resource path is one
+// of the discovery endpoints granted by the upstream "system:discovery" ClusterRole.
+// Guard is deliberately stricter than upstream on one point: a path containing a ".."
+// traversal segment is never treated as discovery. nonResourceAttributes.path on a
+// SelfSubjectAccessReview is fully caller-controlled and is never routed by the API
+// server, so without this check a path such as "/api/../.." would match the "/api/"
+// prefix rule and be exempted from the Azure RBAC check. Reporting false is not a
+// denial; the request falls through to the regular Azure RBAC check (MSRC 132991).
+func isNonResourceDiscoveryPath(lowerPath string) bool {
+	if lowerPath == "" {
+		return false
+	}
+	for _, segment := range strings.Split(lowerPath, "/") {
+		if segment == ".." {
+			return false
+		}
+	}
+	if _, ok := discoveryExactPaths[lowerPath]; ok {
+		return true
+	}
+	for _, prefix := range discoveryPrefixPaths {
+		if strings.HasPrefix(lowerPath, prefix) {
 			return true
 		}
+	}
+	return false
+}
+
+func (a *AccessInfo) AllowNonResPathDiscoveryAccess(request *authzv1.SubjectAccessReviewSpec) bool {
+	if request.NonResourceAttributes != nil && a.allowNonResDiscoveryPathAccess && strings.EqualFold(request.NonResourceAttributes.Verb, "get") {
+		return isNonResourceDiscoveryPath(strings.ToLower(request.NonResourceAttributes.Path))
 	}
 	return false
 }
