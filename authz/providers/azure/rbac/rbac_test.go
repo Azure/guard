@@ -1004,6 +1004,41 @@ type capturedCheckAccess struct {
 	actions    []azureutils.AuthorizationActionInfo
 }
 
+// Test_uppercaseNonResourceVerbCannotPlantACacheableAllow pins the reason the two
+// halves of MSRC 132259 have to land together.
+//
+// The discovery gate does not just return ALLOW, it writes that ALLOW into the
+// result cache (see azure.go), and it runs without any Azure CheckAccess call. So
+// while the gate accepted a case variant and getActionName mapped that variant to
+// no action, a "GET /healthz" review planted an ALLOW under a key built from an
+// empty action - which is the same key every other unmapped verb on that path
+// produces, "post" and "put" among them. The planted ALLOW was then served from
+// cache to a request the gate itself would never have allowed.
+//
+// Either half closes it, and both are asserted here: the gate must reject the
+// case variant, so nothing is planted, and an unmapped verb must not be able to
+// produce a decision that could be cached under the shared key.
+func Test_uppercaseNonResourceVerbCannotPlantACacheableAllow(t *testing.T) {
+	planter := &authzv1.SubjectAccessReviewSpec{
+		User:                  "eve@contoso.com",
+		NonResourceAttributes: &authzv1.NonResourceAttributes{Path: "/healthz", Verb: uppercaseGetVerb},
+	}
+	consumer := &authzv1.SubjectAccessReviewSpec{
+		User:                  "eve@contoso.com",
+		NonResourceAttributes: &authzv1.NonResourceAttributes{Path: "/healthz", Verb: "post"},
+	}
+
+	a := &AccessInfo{allowNonResDiscoveryPathAccess: true}
+	assert.False(t, a.AllowNonResPathDiscoveryAccess(planter),
+		"an uppercase verb must not reach the discovery gate, which caches the ALLOW it returns")
+
+	_, plantErr := getDataActions(context.Background(), planter, aksClusterType, false, false)
+	assert.Error(t, plantErr, "an uppercase verb must not yield a DataAction to check and cache")
+
+	_, consumeErr := getDataActions(context.Background(), consumer, aksClusterType, false, false)
+	assert.Error(t, consumeErr, "an unmapped verb must not yield a DataAction to check and cache")
+}
+
 // Test_AllowNonResPathDiscoveryAccess is the regression test for the discovery
 // half of MSRC 132991. The discovery exemption (which returns ALLOW with no Azure
 // RBAC check) must cover exactly the non-resource URLs of the upstream Kubernetes
