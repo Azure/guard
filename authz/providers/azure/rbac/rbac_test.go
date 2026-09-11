@@ -1010,8 +1010,9 @@ type capturedCheckAccess struct {
 // "system:discovery" ClusterRole - "/api", "/api/*", "/apis", "/apis/*",
 // "/healthz", "/livez", "/openapi", "/openapi/*", "/readyz", "/version" and
 // "/version/" - where only the "*" entries match by prefix and the rest match
-// exactly. Subpaths of the exact-match entries, loose-prefix look-alikes and any
-// path containing a ".." traversal segment must not be exempted.
+// exactly. Subpaths of the exact-match entries, loose-prefix look-alikes, case
+// variants of either the path or the verb, and any path containing a ".."
+// traversal segment must not be exempted.
 func Test_AllowNonResPathDiscoveryAccess(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -1035,7 +1036,19 @@ func Test_AllowNonResPathDiscoveryAccess(t *testing.T) {
 		{name: "readyz", path: "/readyz", verb: "get", allowDiscovery: true, want: true},
 		{name: "version", path: "/version", verb: "get", allowDiscovery: true, want: true},
 		{name: "version trailing slash", path: "/version/", verb: "get", allowDiscovery: true, want: true},
-		{name: "uppercase healthz", path: "/HEALTHZ", verb: "GET", allowDiscovery: true, want: true},
+
+		// Case variants. Upstream rbacv1.NonResourceURLMatches and rbacv1.VerbMatches
+		// both compare with ==, so neither the path nor the verb is folded, and a
+		// non-resource verb reaching an authorizer is already the lowercased HTTP
+		// method. Folding either here would exempt spellings upstream would not match
+		// and the API server would not route, and would put this gate out of step
+		// with the case-sensitive switch in getActionName (MSRC 132259).
+		{name: "uppercase path", path: "/HEALTHZ", verb: "get", allowDiscovery: true, want: false},
+		{name: "mixed case path", path: "/HealthZ", verb: "get", allowDiscovery: true, want: false},
+		{name: "uppercase prefix path", path: "/APIS/apps/v1", verb: "get", allowDiscovery: true, want: false},
+		{name: "uppercase verb", path: "/healthz", verb: uppercaseGetVerb, allowDiscovery: true, want: false},
+		{name: "mixed case verb", path: "/healthz", verb: "Get", allowDiscovery: true, want: false},
+		{name: "uppercase path and verb", path: "/HEALTHZ", verb: uppercaseGetVerb, allowDiscovery: true, want: false},
 
 		// Subpaths of the exact-match entries. Upstream grants only the bare
 		// endpoint, so these real apiserver subpaths are not discovery.
