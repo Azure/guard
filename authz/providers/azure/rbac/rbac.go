@@ -379,37 +379,53 @@ var discoveryExactPaths = map[string]struct{}{
 // with the trailing "*" trimmed, matched as prefixes exactly as upstream does.
 var discoveryPrefixPaths = []string{"/api/", "/apis/", "/openapi/"}
 
-// isNonResourceDiscoveryPath reports whether the lowercased non-resource path is one
-// of the discovery endpoints granted by the upstream "system:discovery" ClusterRole.
+// isNonResourceDiscoveryPath reports whether the non-resource path is one of the
+// discovery endpoints granted by the upstream "system:discovery" ClusterRole.
+//
+// The comparison is case sensitive because upstream rbacv1.NonResourceURLMatches
+// compares rule URLs with == and strings.HasPrefix, neither of which folds case.
+// Case folding here would exempt spellings such as "/APIS" that upstream would not
+// match and that the API server would not route, widening the set of paths that
+// skip the Azure RBAC check.
+//
 // Guard is deliberately stricter than upstream on one point: a path containing a ".."
-// traversal segment is never treated as discovery. nonResourceAttributes.path on a
-// SelfSubjectAccessReview is fully caller-controlled and is never routed by the API
-// server, so without this check a path such as "/api/../.." would match the "/api/"
-// prefix rule and be exempted from the Azure RBAC check. Reporting false is not a
-// denial; the request falls through to the regular Azure RBAC check (MSRC 132991).
-func isNonResourceDiscoveryPath(lowerPath string) bool {
-	if lowerPath == "" {
+// traversal segment is never treated as discovery, because otherwise "/api/../.."
+// would match the "/api/" prefix rule. Reporting false is not a denial; the request
+// falls through to the regular Azure RBAC check (MSRC 132991).
+func isNonResourceDiscoveryPath(nonResourcePath string) bool {
+	if nonResourcePath == "" {
 		return false
 	}
-	for _, segment := range strings.Split(lowerPath, "/") {
-		if segment == ".." {
-			return false
-		}
+	if hasPathTraversalSegment(nonResourcePath) {
+		return false
 	}
-	if _, ok := discoveryExactPaths[lowerPath]; ok {
+	if _, ok := discoveryExactPaths[nonResourcePath]; ok {
 		return true
 	}
 	for _, prefix := range discoveryPrefixPaths {
-		if strings.HasPrefix(lowerPath, prefix) {
+		if strings.HasPrefix(nonResourcePath, prefix) {
 			return true
 		}
 	}
 	return false
 }
 
+// AllowNonResPathDiscoveryAccess reports whether request is a discovery read that
+// Guard exempts from the Azure RBAC check.
+//
+// The verb is matched case sensitively, for the same reason the path is: upstream
+// rbacv1.VerbMatches compares verbs with ==, and a non-resource verb reaching an
+// authorizer is already the lowercased HTTP method, set by
+// request.RequestInfoFactory.NewRequestInfo as strings.ToLower(req.Method). A
+// genuine non-resource request therefore always carries "get", never "GET".
+//
+// Folding case here would also make this gate disagree with getActionName, which
+// maps verbs with a case-sensitive switch and yields no action for "GET". Matching
+// upstream keeps the two in step: a verb this gate accepts is one getActionName
+// maps (MSRC 132259).
 func (a *AccessInfo) AllowNonResPathDiscoveryAccess(request *authzv1.SubjectAccessReviewSpec) bool {
-	if request.NonResourceAttributes != nil && a.allowNonResDiscoveryPathAccess && strings.EqualFold(request.NonResourceAttributes.Verb, "get") {
-		return isNonResourceDiscoveryPath(strings.ToLower(request.NonResourceAttributes.Path))
+	if request.NonResourceAttributes != nil && a.allowNonResDiscoveryPathAccess && request.NonResourceAttributes.Verb == "get" {
+		return isNonResourceDiscoveryPath(request.NonResourceAttributes.Path)
 	}
 	return false
 }
