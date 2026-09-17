@@ -610,7 +610,11 @@ func (a *AccessInfo) CheckAccess(ctx context.Context, request *authzv1.SubjectAc
 
 		status, err = a.performCheckAccess(ctx, aiManagerURL, bodiesForAIManagerRBAC, checkAccessUsername)
 		if err != nil {
-			return nil, fmt.Errorf("AI Manager check access failed: %w", err)
+			code := http.StatusInternalServerError
+			if v, ok := err.(errutils.HttpStatusCode); ok {
+				code = v.Code()
+			}
+			return nil, errutils.WithCode(fmt.Errorf("AI Manager check access failed: %w", err), code)
 		}
 		if status != nil && status.Allowed {
 			log.V(5).Info("AI Manager check access allowed")
