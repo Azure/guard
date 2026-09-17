@@ -362,7 +362,11 @@ func (a *AccessInfo) checkAccessV2(ctx context.Context, request *authzv1.Subject
 
 		status, err = a.performCheckAccessV2(ctx, aiManagerResourceId, aiManagerActions, userOid, groups)
 		if err != nil {
-			return nil, fmt.Errorf("AI Manager CheckAccess v2 failed: %w", err)
+			code := http.StatusInternalServerError
+			if v, ok := err.(errutils.HttpStatusCode); ok {
+				code = v.Code()
+			}
+			return nil, errutils.WithCode(fmt.Errorf("AI Manager CheckAccess v2 failed: %w", err), code)
 		}
 		if status != nil && status.Allowed {
 			log.V(5).Info("AI Manager CheckAccess v2 allowed")
