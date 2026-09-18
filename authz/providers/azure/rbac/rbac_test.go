@@ -1169,14 +1169,50 @@ func TestCheckAccess_AIManagerFallback(t *testing.T) {
 	}
 }
 
+// Test_uppercaseNonResourceVerbCannotPlantACacheableAllow pins the reason the two
+// halves of MSRC 132259 have to land together.
+//
+// The discovery gate does not just return ALLOW, it writes that ALLOW into the
+// result cache (see azure.go), and it runs without any Azure CheckAccess call. So
+// while the gate accepted a case variant and getActionName mapped that variant to
+// no action, a "GET /healthz" review planted an ALLOW under a key built from an
+// empty action - which is the same key every other unmapped verb on that path
+// produces, "post" and "put" among them. The planted ALLOW was then served from
+// cache to a request the gate itself would never have allowed.
+//
+// Either half closes it, and both are asserted here: the gate must reject the
+// case variant, so nothing is planted, and an unmapped verb must not be able to
+// produce a decision that could be cached under the shared key.
+func Test_uppercaseNonResourceVerbCannotPlantACacheableAllow(t *testing.T) {
+	planter := &authzv1.SubjectAccessReviewSpec{
+		User:                  "eve@contoso.com",
+		NonResourceAttributes: &authzv1.NonResourceAttributes{Path: "/healthz", Verb: uppercaseGetVerb},
+	}
+	consumer := &authzv1.SubjectAccessReviewSpec{
+		User:                  "eve@contoso.com",
+		NonResourceAttributes: &authzv1.NonResourceAttributes{Path: "/healthz", Verb: "post"},
+	}
+
+	a := &AccessInfo{allowNonResDiscoveryPathAccess: true}
+	assert.False(t, a.AllowNonResPathDiscoveryAccess(planter),
+		"an uppercase verb must not reach the discovery gate, which caches the ALLOW it returns")
+
+	_, plantErr := getDataActions(context.Background(), planter, aksClusterType, false, false)
+	assert.Error(t, plantErr, "an uppercase verb must not yield a DataAction to check and cache")
+
+	_, consumeErr := getDataActions(context.Background(), consumer, aksClusterType, false, false)
+	assert.Error(t, consumeErr, "an unmapped verb must not yield a DataAction to check and cache")
+}
+
 // Test_AllowNonResPathDiscoveryAccess is the regression test for the discovery
 // half of MSRC 132991. The discovery exemption (which returns ALLOW with no Azure
 // RBAC check) must cover exactly the non-resource URLs of the upstream Kubernetes
 // "system:discovery" ClusterRole - "/api", "/api/*", "/apis", "/apis/*",
 // "/healthz", "/livez", "/openapi", "/openapi/*", "/readyz", "/version" and
 // "/version/" - where only the "*" entries match by prefix and the rest match
-// exactly. Subpaths of the exact-match entries, loose-prefix look-alikes and any
-// path containing a ".." traversal segment must not be exempted.
+// exactly. Subpaths of the exact-match entries, loose-prefix look-alikes, case
+// variants of either the path or the verb, and any path containing a ".."
+// traversal segment must not be exempted.
 func Test_AllowNonResPathDiscoveryAccess(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -1200,7 +1236,19 @@ func Test_AllowNonResPathDiscoveryAccess(t *testing.T) {
 		{name: "readyz", path: "/readyz", verb: "get", allowDiscovery: true, want: true},
 		{name: "version", path: "/version", verb: "get", allowDiscovery: true, want: true},
 		{name: "version trailing slash", path: "/version/", verb: "get", allowDiscovery: true, want: true},
-		{name: "uppercase healthz", path: "/HEALTHZ", verb: "GET", allowDiscovery: true, want: true},
+
+		// Case variants. Upstream rbacv1.NonResourceURLMatches and rbacv1.VerbMatches
+		// both compare with ==, so neither the path nor the verb is folded, and a
+		// non-resource verb reaching an authorizer is already the lowercased HTTP
+		// method. Folding either here would exempt spellings upstream would not match
+		// and the API server would not route, and would put this gate out of step
+		// with the case-sensitive switch in getActionName (MSRC 132259).
+		{name: "uppercase path", path: "/HEALTHZ", verb: "get", allowDiscovery: true, want: false},
+		{name: "mixed case path", path: "/HealthZ", verb: "get", allowDiscovery: true, want: false},
+		{name: "uppercase prefix path", path: "/APIS/apps/v1", verb: "get", allowDiscovery: true, want: false},
+		{name: "uppercase verb", path: "/healthz", verb: uppercaseGetVerb, allowDiscovery: true, want: false},
+		{name: "mixed case verb", path: "/healthz", verb: "Get", allowDiscovery: true, want: false},
+		{name: "uppercase path and verb", path: "/HEALTHZ", verb: uppercaseGetVerb, allowDiscovery: true, want: false},
 
 		// Subpaths of the exact-match entries. Upstream grants only the bare
 		// endpoint, so these real apiserver subpaths are not discovery.

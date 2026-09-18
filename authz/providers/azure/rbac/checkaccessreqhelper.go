@@ -210,6 +210,24 @@ func getValidSecurityGroups(groups []string) []string {
 	return finalGroups
 }
 
+// hasPathTraversalSegment reports whether p contains a ".." segment.
+//
+// path.Join applies path.Clean, which resolves ".." against the preceding segment.
+// Any caller-controlled value that reaches a path.Join used to build an
+// authorization identifier can therefore name a different identifier than the one
+// the request states. nonResourceAttributes.path on a SelfSubjectAccessReview is
+// caller-controlled and is never routed by the API server, and a path the API
+// server did route is already normalized, so a ".." segment only ever appears on a
+// hand-built request (MSRC 132259).
+func hasPathTraversalSegment(p string) bool {
+	for _, segment := range strings.Split(p, "/") {
+		if segment == ".." {
+			return true
+		}
+	}
+	return false
+}
+
 func getActionName(verb string) string {
 	/* Kubernetes supprots some special verbs for which we need to return data action /verb/action.
 	Following is the list of special verbs and their API group/resources in Kubernetes:
@@ -313,6 +331,21 @@ func getDataActions(ctx context.Context, subRevReq *authzv1.SubjectAccessReviewS
 	log := klog.FromContext(ctx)
 
 	if subRevReq.ResourceAttributes != nil {
+		// A resource verb Guard does not map contributes an empty action to
+		// getResourceAndAction, and path.Join drops it: the DataAction collapses to
+		// the bare resource, so every unmapped verb asks the same question and shares
+		// one cache entry. The wildcard path already rejects such a verb in
+		// createAuthorizationActionInfoList; rejecting it here keeps the single
+		// resource path consistent. The API server derives a resource verb from a
+		// closed set, so an unmapped one only reaches Guard on a hand-built
+		// SubjectAccessReview (MSRC 132259).
+		if getActionName(subRevReq.ResourceAttributes.Verb) == "" {
+			return nil, errutils.WithCode(
+				fmt.Errorf("no DataAction is defined for verb %q on resource %q", subRevReq.ResourceAttributes.Verb, subRevReq.ResourceAttributes.Resource),
+				http.StatusBadRequest,
+			)
+		}
+
 		storedOperationsMap := getStoredOperationsMap()
 
 		isCustomerResourceTypeCheckAvailable := allowCustomResourceTypeCheck && len(storedOperationsMap) != 0
@@ -374,10 +407,35 @@ func getDataActions(ctx context.Context, subRevReq *authzv1.SubjectAccessReviewS
 
 		}
 	} else if subRevReq.NonResourceAttributes != nil {
+		attr := subRevReq.NonResourceAttributes
+
+		// Both fields are validated before they reach path.Join below, because it
+		// builds the DataAction that Guard asks Azure about. An unmapped verb
+		// contributes an empty final element, which path.Join drops: every verb
+		// Guard does not map would ask the same truncated question, and would share
+		// one cache entry, for a given path. A ".." segment is resolved by
+		// path.Clean, letting a caller-controlled path name a DataAction other than
+		// the one the request states. Neither can arise from a request the API
+		// server routed, so both are rejected rather than normalized (MSRC 132259).
+		action := getActionName(attr.Verb)
+		if action == "" {
+			return nil, errutils.WithCode(
+				fmt.Errorf("no DataAction is defined for non-resource verb %q on path %q", attr.Verb, attr.Path),
+				http.StatusBadRequest,
+			)
+		}
+
+		if hasPathTraversalSegment(attr.Path) {
+			return nil, errutils.WithCode(
+				fmt.Errorf(`non-resource path %q contains a ".." segment`, attr.Path),
+				http.StatusBadRequest,
+			)
+		}
+
 		authInfoSingle := azureutils.AuthorizationActionInfo{
 			IsDataAction: true,
 		}
-		authInfoSingle.AuthorizationEntity.Id = path.Join(clusterType, subRevReq.NonResourceAttributes.Path, getActionName(subRevReq.NonResourceAttributes.Verb))
+		authInfoSingle.AuthorizationEntity.Id = path.Join(clusterType, attr.Path, action)
 		authInfoList = append(authInfoList, authInfoSingle)
 	}
 	return authInfoList, nil
