@@ -38,6 +38,21 @@ const (
 	resourceId      = "resourceId"
 	aksClusterType  = "aks"
 	subresourceAttr = "Microsoft.ContainerService/managedClusters/resources:subresource"
+
+	customResourceGroupAttr = "Microsoft.ContainerService/managedClusters/customResources:group"
+	customResourceKindAttr  = "Microsoft.ContainerService/managedClusters/customResources:kind"
+
+	// Two distinct custom resource groups, so a test can assert that a request for
+	// one is reported under its own group rather than the other's.
+	alphaGroup = "alpha.example.com"
+	alphaKind  = "widgets"
+	betaGroup  = "beta.example.com"
+	betaKind   = "gadgets"
+
+	// verbPatch is the one request verb in the table below that also appears
+	// elsewhere in this package; naming it keeps the literal under goconst's
+	// duplicate threshold.
+	verbPatch = "patch"
 )
 
 func createOperationsMap(clusterType string) azureutils.OperationsMap {
@@ -1089,6 +1104,14 @@ func Test_prepareCheckAccessRequestBodyWithCustomResource(t *testing.T) {
 	}
 }
 
+// Test_prepareCheckAccessRequestBodyWithCustomResourceOperationsMapEmpty pins the
+// degraded path taken when discovery has not populated the operations map, leaving
+// guard unable to tell a custom resource from a built-in one. The per-apiGroup
+// DataAction asserted below carries no customResources attributes, so a condition
+// scoped to those attributes is not evaluated while the map is empty. This is the
+// documented consequence of running without discovery, not the desired outcome -
+// see Test_prepareCheckAccessRequestBodyCustomResourceConditionIsEvaluable for the
+// behaviour that applies once the map is populated. MSRC 140081.
 func Test_prepareCheckAccessRequestBodyWithCustomResourceOperationsMapEmpty(t *testing.T) {
 	req := &authzv1.SubjectAccessReviewSpec{
 		ResourceAttributes: &authzv1.ResourceAttributes{
@@ -1121,6 +1144,13 @@ func Test_prepareCheckAccessRequestBodyWithCustomResourceOperationsMapEmpty(t *t
 	}
 }
 
+// Test_prepareCheckAccessRequestBodyWithCustomResourceTypeCheckDisabled pins the
+// behaviour of the explicit opt-out (allowCustomResourceTypeCheck=false). The
+// per-apiGroup DataAction asserted below is not an authorable DataAction, so it is
+// only ever satisfied by a wildcard, and it carries no customResources attributes -
+// meaning a condition scoped to those attributes is not evaluated. The option
+// defaults to true precisely so that this is reached only by deliberate opt-out.
+// MSRC 140081.
 func Test_prepareCheckAccessRequestBodyWithCustomResourceTypeCheckDisabled(t *testing.T) {
 	req := &authzv1.SubjectAccessReviewSpec{
 		ResourceAttributes: &authzv1.ResourceAttributes{
@@ -1153,6 +1183,119 @@ func Test_prepareCheckAccessRequestBodyWithCustomResourceTypeCheckDisabled(t *te
 	}
 }
 
+// Test_prepareCheckAccessRequestBodyCustomResourceConditionIsEvaluable asserts that
+// a custom resource request resolves to the generic customresources DataAction and
+// carries the exact group and kind attribute VALUES for the resource requested.
+//
+// Both halves matter, and neither is covered by asserting the action alone:
+//
+//   - The DataAction must be the generic customresources form. A condition guarded
+//     by ActionMatches{...*/customresources/<verb>} never evaluates its group/kind
+//     comparison for any other action string, so a per-apiGroup DataAction leaves
+//     the condition inert rather than failing it.
+//   - The attribute values must be those of the resource actually requested. A
+//     condition confining access to one group/kind can only deny a request for a
+//     different group/kind if the attributes reported for that request are its own.
+//     Asserting only that the attribute keys are present cannot distinguish a
+//     correctly scoped request from one reporting some other group.
+//
+// MSRC 140081.
+func Test_prepareCheckAccessRequestBodyCustomResourceConditionIsEvaluable(t *testing.T) {
+	tests := []struct {
+		name       string
+		group      string
+		resource   string
+		verb       string
+		wantAction string
+	}{
+		{"inConditionRead", alphaGroup, alphaKind, "get", "aks/customresources/read"},
+		{"inConditionList", alphaGroup, alphaKind, "list", "aks/customresources/read"},
+		// A request for a group outside a condition's scope must still report its own
+		// group and kind, so the condition evaluates - and denies - on those values.
+		{"outOfConditionRead", betaGroup, betaKind, "get", "aks/customresources/read"},
+		// Write verbs travel the same path; patch is how an out-of-scope object would
+		// be modified, so it must be as evaluable as read.
+		{"outOfConditionPatch", betaGroup, betaKind, verbPatch, "aks/customresources/write"},
+		{"outOfConditionCreate", betaGroup, betaKind, "create", "aks/customresources/write"},
+		{"outOfConditionDelete", betaGroup, betaKind, "delete", "aks/customresources/delete"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := &authzv1.SubjectAccessReviewSpec{
+				ResourceAttributes: &authzv1.ResourceAttributes{
+					Namespace: "dev",
+					Group:     tt.group,
+					Resource:  tt.resource,
+					Version:   "v1",
+					Verb:      tt.verb,
+				},
+				Extra: map[string]authzv1.ExtraValue{"oid": {uuid.NewString()}},
+			}
+
+			clusterType := aksClusterType
+			setStoredOperationsMap(t, createOperationsMap(clusterType))
+
+			got, err := prepareCheckAccessRequestBody(context.Background(), req, clusterType, resourceId, false, true, false)
+			if err != nil {
+				t.Fatalf("prepareCheckAccessRequestBody returned error: %v", err)
+			}
+			if len(got) == 0 || len(got[0].Actions) == 0 {
+				t.Fatalf("Want: at least one action, got: %v", got)
+			}
+
+			action := got[0].Actions[0]
+			if action.AuthorizationEntity.Id != tt.wantAction {
+				t.Errorf("action Id: want %q, got %q", tt.wantAction, action.AuthorizationEntity.Id)
+			}
+			if got := action.Attributes[customResourceGroupAttr]; got != tt.group {
+				t.Errorf("%s: want %q, got %q", customResourceGroupAttr, tt.group, got)
+			}
+			if got := action.Attributes[customResourceKindAttr]; got != tt.resource {
+				t.Errorf("%s: want %q, got %q", customResourceKindAttr, tt.resource, got)
+			}
+		})
+	}
+}
+
+// Test_prepareCheckAccessRequestBodyBuiltInResourceIsUnaffected guards the privilege
+// floor from the other side: resolving custom resources to the customresources
+// DataAction must not reclassify a built-in resource. A built-in present in the
+// operations map must keep its own per-apiGroup DataAction and must not acquire
+// customResources attributes, otherwise a condition scoped to custom resources would
+// start filtering built-in access. MSRC 140081.
+func Test_prepareCheckAccessRequestBodyBuiltInResourceIsUnaffected(t *testing.T) {
+	req := &authzv1.SubjectAccessReviewSpec{
+		ResourceAttributes: &authzv1.ResourceAttributes{
+			Namespace: "dev",
+			Group:     "apps",
+			Resource:  "deployments",
+			Version:   "v1",
+			Verb:      "get",
+		},
+		Extra: map[string]authzv1.ExtraValue{"oid": {uuid.NewString()}},
+	}
+
+	clusterType := aksClusterType
+	setStoredOperationsMap(t, createOperationsMap(clusterType))
+
+	got, err := prepareCheckAccessRequestBody(context.Background(), req, clusterType, resourceId, false, true, false)
+	if err != nil {
+		t.Fatalf("prepareCheckAccessRequestBody returned error: %v", err)
+	}
+	if len(got) == 0 || len(got[0].Actions) == 0 {
+		t.Fatalf("Want: at least one action, got: %v", got)
+	}
+
+	action := got[0].Actions[0]
+	if want := "aks/apps/deployments/read"; action.AuthorizationEntity.Id != want {
+		t.Errorf("action Id: want %q, got %q", want, action.AuthorizationEntity.Id)
+	}
+	if len(action.Attributes) != 0 {
+		t.Errorf("built-in resource must carry no customResources attributes, got %v", action.Attributes)
+	}
+}
+
 func Test_prepareCheckAccessRequestBodyWithCustomResourceAndStars(t *testing.T) {
 	req := &authzv1.SubjectAccessReviewSpec{
 		ResourceAttributes: &authzv1.ResourceAttributes{
@@ -1182,16 +1325,16 @@ func Test_prepareCheckAccessRequestBodyWithCustomResourceAndStars(t *testing.T) 
 
 	customResourceActions := []azureutils.AuthorizationActionInfo{
 		{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/customresources/read"}, IsDataAction: true, Attributes: map[string]string{
-			"Microsoft.ContainerService/managedClusters/customResources:kind":  "*",
-			"Microsoft.ContainerService/managedClusters/customResources:group": "customresources.contoso.io",
+			customResourceKindAttr:  "*",
+			customResourceGroupAttr: "customresources.contoso.io",
 		}},
 		{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/customresources/write"}, IsDataAction: true, Attributes: map[string]string{
-			"Microsoft.ContainerService/managedClusters/customResources:kind":  "*",
-			"Microsoft.ContainerService/managedClusters/customResources:group": "customresources.contoso.io",
+			customResourceKindAttr:  "*",
+			customResourceGroupAttr: "customresources.contoso.io",
 		}},
 		{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/customresources/delete"}, IsDataAction: true, Attributes: map[string]string{
-			"Microsoft.ContainerService/managedClusters/customResources:kind":  "*",
-			"Microsoft.ContainerService/managedClusters/customResources:group": "customresources.contoso.io",
+			customResourceKindAttr:  "*",
+			customResourceGroupAttr: "customresources.contoso.io",
 		}},
 	}
 
