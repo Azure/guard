@@ -501,10 +501,14 @@ func Test_getDataActions(t *testing.T) {
 			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/nodes/proxy/action"}, IsDataAction: true}},
 		},
 
-		// serviceaccounts/token is the TokenRequest API. Upstream Kubernetes
-		// lists it as its own resource in the aggregate-to-edit ClusterRole,
-		// separate from the write rule on serviceaccounts, so it must produce a
-		// distinct DataAction instead of collapsing onto serviceaccounts/write.
+		// serviceaccounts/token is the TokenRequest API. Upstream editRules()
+		// grants "impersonate" on serviceaccounts and "create" on
+		// serviceaccounts/token in the same role, so minting a token carries the
+		// same authority as impersonating the ServiceAccount and neither follows
+		// from writing the object. The provider publishes
+		// serviceaccounts/impersonate/action but no serviceaccounts/token action,
+		// so TokenRequest maps onto the impersonate action: not implied by
+		// serviceaccounts/write, and still grantable by a least-privilege role.
 		{
 			"serviceAccountsTokenCreateAKS",
 			args{
@@ -513,7 +517,7 @@ func Test_getDataActions(t *testing.T) {
 					ResourceAttributes: &authzv1.ResourceAttributes{Group: "", Resource: "serviceaccounts", Subresource: "token", Version: "v1", Name: "test", Verb: "create"},
 				}, clusterType: aksClusterType,
 			},
-			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/serviceaccounts/token/action"}, IsDataAction: true}},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/serviceaccounts/impersonate/action"}, IsDataAction: true}},
 		},
 
 		{
@@ -524,7 +528,34 @@ func Test_getDataActions(t *testing.T) {
 					ResourceAttributes: &authzv1.ResourceAttributes{Group: "", Resource: "serviceaccounts", Subresource: "token", Version: "v1", Name: "test", Verb: "create"},
 				}, clusterType: "fleet",
 			},
-			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "fleet/serviceaccounts/token/action"}, IsDataAction: true}},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "fleet/serviceaccounts/impersonate/action"}, IsDataAction: true}},
+		},
+
+		// pods/ephemeralcontainers injects a container into a running Pod, the
+		// mechanism behind kubectl debug, and yields code execution in that Pod.
+		// Upstream omits it from editRules() entirely, so it must not follow from
+		// pods/write. It maps onto pods/exec/action, the published action of
+		// equivalent authority.
+		{
+			"podsEphemeralContainersUpdateAKS",
+			args{
+				isWildcardTest: false,
+				subRevReq: &authzv1.SubjectAccessReviewSpec{
+					ResourceAttributes: &authzv1.ResourceAttributes{Group: "", Resource: "pods", Subresource: "ephemeralcontainers", Version: "v1", Name: "test", Verb: "update"},
+				}, clusterType: aksClusterType,
+			},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/pods/exec/action"}, IsDataAction: true}},
+		},
+
+		{
+			"podsEphemeralContainersPatchFleet",
+			args{
+				isWildcardTest: false,
+				subRevReq: &authzv1.SubjectAccessReviewSpec{
+					ResourceAttributes: &authzv1.ResourceAttributes{Group: "", Resource: "pods", Subresource: "ephemeralcontainers", Version: "v1", Name: "test", Verb: "patch"},
+				}, clusterType: "fleet",
+			},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "fleet/pods/exec/action"}, IsDataAction: true}},
 		},
 
 		// Writing the ServiceAccount object itself is unchanged: it must still
@@ -935,6 +966,63 @@ func createSet(authinfos []azureutils.AuthorizationActionInfo) map[azureutils.Au
 		set[elem.AuthorizationEntity] = elem
 	}
 	return set
+}
+
+// assertSubresourceNotCollapsed fails if the DataAction emitted for
+// resource/subresource matches the DataAction a principal holding only the
+// parent resource would hold, for any of the supplied verbs.
+func assertSubresourceNotCollapsed(t *testing.T, resource, subresource string, verbs []string) {
+	t.Helper()
+
+	for _, verb := range verbs {
+		parentAction := getResourceAndAction(resource, "", verb)
+		subresourceAction := getResourceAndAction(resource, subresource, verb)
+
+		if subresourceAction == parentAction {
+			t.Errorf("verb %q: %s/%s resolves to the parent action %q, so a principal holding only the parent action is granted the subresource",
+				verb, resource, subresource, parentAction)
+		}
+	}
+}
+
+// Test_getResourceAndAction_parentActionNeverImpliesSubresource is a negative
+// control over the whole securitySensitiveSubresources table. For every pair
+// Guard classifies as security sensitive, the DataAction emitted for the
+// subresource request must differ from the DataAction the parent resource
+// collapses to, so holding only the parent action never confers the
+// subresource.
+//
+// The positive-path cases in Test_getDataActions pin the exact string for the
+// pairs they name and therefore cannot catch a regression that reintroduces the
+// collapse for some other entry. This one covers every entry, including ones
+// added later.
+//
+// Grantability is a separate property this test cannot assert: an action string
+// composed here is only authorizable if Microsoft.ContainerService publishes it.
+// Verify that out of band with `az provider operation show` per CLAUDE.md,
+// "Changing the DataAction Mapping".
+func Test_getResourceAndAction_parentActionNeverImpliesSubresource(t *testing.T) {
+	// Verbs a role scoped to the parent resource alone would exercise. The "*"
+	// verb is excluded: a wildcard role legitimately covers the subresource.
+	parentVerbs := []string{"get", "list", "watch", "create", "update", "patch", "delete", "deletecollection"}
+
+	type sensitivePair struct {
+		resource    string
+		subresource string
+	}
+
+	var pairs []sensitivePair
+	for resource, subresources := range securitySensitiveSubresources {
+		for subresource := range subresources {
+			pairs = append(pairs, sensitivePair{resource: resource, subresource: subresource})
+		}
+	}
+
+	for _, pair := range pairs {
+		t.Run(pair.resource+"/"+pair.subresource, func(t *testing.T) {
+			assertSubresourceNotCollapsed(t, pair.resource, pair.subresource, parentVerbs)
+		})
+	}
 }
 
 func Test_getNameSpaceScope(t *testing.T) {

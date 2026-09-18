@@ -256,49 +256,75 @@ func getActionName(verb string) string {
 	}
 }
 
-// securitySensitiveSubresources lists resource/subresource pairs that upstream
-// Kubernetes treats as distinct authorization targets. For these, the
-// subresource is preserved in the DataAction string
-// ("<resource>/<subresource>/action") rather than collapsed into the base
-// resource action, so the authorization decision keeps the same granularity as
-// the upstream Kubernetes RBAC model (see the bootstrappolicy view/edit
-// ClusterRoles).
+// Subresource and DataAction segments used by securitySensitiveSubresources.
+const (
+	EphemeralContainersSubresource = "ephemeralcontainers"
+
+	execActionSegment        = "exec/action"
+	attachActionSegment      = "attach/action"
+	portForwardActionSegment = "portforward/action"
+	proxyActionSegment       = "proxy/action"
+	impersonateActionSegment = "impersonate/action"
+)
+
+// securitySensitiveSubresources maps resource/subresource pairs that upstream
+// Kubernetes treats as distinct authorization targets onto the DataAction
+// segment carrying the same authority. Requests matching an entry do not
+// collapse into the base <resource>/<verb> action, so the decision keeps the
+// granularity of the upstream Kubernetes RBAC model.
 //
-// The pods exec/attach/portforward/proxy, services/proxy and nodes/proxy
-// subresources are granted separately from base read/write in the upstream
-// roles, so they are mapped to their own DataAction rather than to
-// <resource>/read or <resource>/write.
+// The value is an explicit action segment rather than an implied
+// "<subresource>/action" because Guard does not own the
+// Microsoft.ContainerService action namespace. An action the resource provider
+// does not publish is deniable but not grantable: ARM rejects it in custom role
+// definitions and the built-in Reader/Writer roles enumerate leaf actions, so
+// only wildcard-bearing roles match it. Where the provider already publishes an
+// action of equivalent authority, map onto that action so a least-privilege
+// role can still grant the operation. See CLAUDE.md, "Changing the DataAction
+// Mapping", and verify every entry with `az provider operation show`.
 //
-// serviceaccounts/token is the TokenRequest API. Upstream lists it as its own
-// resource in the aggregate-to-edit ClusterRole
-// ("create" on "serviceaccounts/token", separate from the write rule on
-// "serviceaccounts"), because issuing a bearer token for a ServiceAccount is a
-// credential-minting operation rather than an update of the ServiceAccount
-// object. Collapsing it into serviceaccounts/write would grant token issuance
-// to every principal that can create or update ServiceAccount objects, which
-// upstream Kubernetes RBAC does not do.
-var securitySensitiveSubresources = map[string]map[string]struct{}{
+// Upstream references, plugin/pkg/auth/authorizer/rbac/bootstrappolicy/policy.go:
+//   - editRules() grants read and write on pods/attach, pods/proxy, pods/exec,
+//     pods/portforward and services/proxy in rules separate from pods and
+//     services, so these do not collapse into <resource>/read or
+//     <resource>/write.
+//   - kubeletAPIAdminRules (ClusterRole system:kubelet-api-admin) grants "*" on
+//     nodes/proxy separately from read-only access to nodes.
+//   - editRules() grants "impersonate" on serviceaccounts and "create" on
+//     serviceaccounts/token in the same role. Minting a token for a
+//     ServiceAccount and impersonating it confer the same authority, and
+//     upstream implies neither from writing the ServiceAccount object. The
+//     provider publishes serviceaccounts/impersonate/action but no
+//     serviceaccounts/token action, so TokenRequest maps onto the impersonate
+//     action: still not implied by serviceaccounts/write, and still grantable.
+//   - pods/ephemeralcontainers injects a container into a running Pod, the
+//     mechanism behind kubectl debug, and yields code execution in that Pod.
+//     Upstream omits it from editRules() entirely, so it must not follow from
+//     pods/write. The provider publishes no ephemeralcontainers action, so it
+//     maps onto pods/exec/action, the published action of equivalent authority.
+var securitySensitiveSubresources = map[string]map[string]string{
 	PodsResource: {
-		ExecSubresource:        {},
-		AttachSubresource:      {},
-		PortForwardSubresource: {},
-		ProxySubresource:       {},
+		ExecSubresource:                execActionSegment,
+		AttachSubresource:              attachActionSegment,
+		PortForwardSubresource:         portForwardActionSegment,
+		ProxySubresource:               proxyActionSegment,
+		EphemeralContainersSubresource: execActionSegment,
 	},
 	ServicesResource: {
-		ProxySubresource: {},
+		ProxySubresource: proxyActionSegment,
 	},
 	NodesResource: {
-		ProxySubresource: {},
+		ProxySubresource: proxyActionSegment,
 	},
 	ServiceAccountsResource: {
-		TokenSubresource: {},
+		TokenSubresource: impersonateActionSegment,
 	},
 }
 
 func getResourceAndAction(resource string, subResource string, verb string) string {
 	if subs, ok := securitySensitiveSubresources[resource]; ok && subResource != "" {
-		if _, sensitive := subs[subResource]; sensitive {
-			return path.Join(resource, subResource, "action")
+		if actionSegment, sensitive := subs[subResource]; sensitive {
+			return path.Join(resource, actionSegment)
 		}
 	}
 	return path.Join(resource, getActionName(verb))

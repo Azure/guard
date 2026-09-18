@@ -80,11 +80,22 @@ If the action is absent, the change is breaking and there is no customer-side fi
   reachable only through a wildcard that grants far more than the caller needs. The RP
   operations manifest must ship first.
 
-Registered as of 2026-08-18: `managedClusters/pods/{read,write,delete}`,
-`managedClusters/pods/exec/action`,
+Registered as of 2026-09-11: `managedClusters/pods/{read,write,delete}`,
+`managedClusters/pods/exec/action`, `managedClusters/nodes/{read,write,delete}`,
+`managedClusters/services/{read,write,delete}`,
+`managedClusters/serviceaccounts/{read,write,delete}`,
+`managedClusters/serviceaccounts/impersonate/action`,
 `managedClusters/certificates.k8s.io/certificatesigningrequests/{read,write,delete}`.
-NOT registered: `pods/{attach,portforward,proxy}/action`, `services/proxy/action`,
-`nodes/proxy/action`, `certificatesigningrequests/nodeclient/action`.
+NOT registered: `pods/{attach,portforward,proxy}/action`,
+`pods/ephemeralcontainers/action`, `services/proxy/action`, `nodes/proxy/action`,
+`serviceaccounts/token/action`, `certificatesigningrequests/nodeclient/action`.
+
+When the provider publishes no action for a subresource but does publish one of
+equivalent authority, map onto the published action instead of inventing an
+unpublished one: `serviceaccounts/token` maps to
+`serviceaccounts/impersonate/action` and `pods/ephemeralcontainers` to
+`pods/exec/action`. Both stay excluded from the parent `write` action and remain
+grantable from a least-privilege custom role.
 
 Two things that make this easy to miss in review:
 
