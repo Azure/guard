@@ -35,3 +35,6 @@ _testmain.go
 
 # Test binaries
 tests/mock-server/mock-server
+# Cross-compiled tokenlab helpers, built ad hoc and copied into a pod
+tests/mock-server/probe-linux-*
+tests/mock-server/token-proxy-linux-*
