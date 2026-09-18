@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"go.kubeguard.dev/guard/auth/providers/azure/graph"
+	errutils "go.kubeguard.dev/guard/util/error"
 
 	"github.com/coreos/go-oidc"
 	"github.com/go-chi/chi/v5"
@@ -208,6 +209,15 @@ func serverSetup(loginResp string, loginStatus int, jwkResp, groupIds, groupList
 	}))
 
 	m.Post("/api/users/abc-123d4/getMemberGroups", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if len(groupStatus) > 0 {
+			w.WriteHeader(groupStatus[0])
+		} else {
+			w.WriteHeader(http.StatusOK)
+		}
+		_, _ = w.Write(groupIds)
+	}))
+
+	m.Post("/api/servicePrincipals/{oid}/getMemberGroups", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if len(groupStatus) > 0 {
 			w.WriteHeader(groupStatus[0])
 		} else {
@@ -456,7 +466,26 @@ func TestCheckAzureAuthenticationSPNWithOverage(t *testing.T) {
 		t.Fatalf("Error when creating signing key. reason : %v", err)
 	}
 
-	t.Run("SPN token with overage claim should return clear error", func(t *testing.T) {
+	t.Run("SPN token with overage claim resolves groups via servicePrincipals getMemberGroups", func(t *testing.T) {
+		srv, client := getServerAndClient(t, signKey, loginResp, 3, true, false, ClientCredentialAuthMode)
+		client.Options.ResolveGroupMembershipOnlyOnOverageClaim = true
+		client.Options.UseGroupUID = true
+		client.Options.EnableSPGroupResolution = true
+		defer srv.Close()
+
+		token, err := signKey.sign([]byte(fmt.Sprintf(accessTokenSPNWithOverage, srv.URL)))
+		if err != nil {
+			t.Fatalf("Error when signing token. reason: %v", err)
+		}
+
+		resp, err := client.Check(ctx, token)
+		assert.Nil(t, err)
+		assert.NotNil(t, resp)
+		assert.Equal(t, 3, len(resp.Groups))
+		assert.ElementsMatch(t, []string{"1", "2", "3"}, resp.Groups)
+	})
+
+	t.Run("SPN token with overage claim is rejected when SP group resolution is disabled", func(t *testing.T) {
 		srv, client := getServerAndClient(t, signKey, loginResp, 3, true, false, ClientCredentialAuthMode)
 		client.Options.ResolveGroupMembershipOnlyOnOverageClaim = true
 		client.Options.UseGroupUID = true
@@ -471,11 +500,29 @@ func TestCheckAzureAuthenticationSPNWithOverage(t *testing.T) {
 		assert.NotNil(t, err)
 		assert.Nil(t, resp)
 		assert.Contains(t, err.Error(), "service principal with group membership exceeding 200 is not supported")
-		assert.Contains(t, err.Error(), "kubelogin-authentication-in-aks-limitations")
 
-		codeErr, ok := err.(interface{ Code() int })
-		assert.True(t, ok, "error should implement Code()")
-		assert.Equal(t, http.StatusOK, codeErr.Code(), "error should HTTP 200 so the API server logs the message.")
+		codeErr, ok := err.(errutils.HttpStatusCode)
+		assert.True(t, ok, "error should carry an http status code")
+		assert.Equal(t, http.StatusOK, codeErr.Code())
+	})
+
+	t.Run("SPN token with overage claim surfaces graph failure", func(t *testing.T) {
+		srv, client := getServerAndClient(t, signKey, loginResp, 3, true, false, ClientCredentialAuthMode, http.StatusInternalServerError)
+		client.Options.ResolveGroupMembershipOnlyOnOverageClaim = true
+		client.Options.UseGroupUID = true
+		client.Options.EnableSPGroupResolution = true
+		defer srv.Close()
+
+		token, err := signKey.sign([]byte(fmt.Sprintf(accessTokenSPNWithOverage, srv.URL)))
+		if err != nil {
+			t.Fatalf("Error when signing token. reason: %v", err)
+		}
+
+		resp, err := client.Check(ctx, token)
+		assert.NotNil(t, err)
+		assert.Nil(t, resp)
+		assert.Contains(t, err.Error(), "failed to get groups")
+		assert.NotContains(t, err.Error(), "service principal with group membership exceeding 200 is not supported")
 	})
 
 	t.Run("SPN token with groups in token should succeed (no Graph call needed)", func(t *testing.T) {
