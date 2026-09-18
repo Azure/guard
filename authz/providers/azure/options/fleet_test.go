@@ -19,8 +19,19 @@ package options
 import (
 	"testing"
 
+	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/assert"
 )
+
+func TestEnforceCSRNodeClientDataActionFlag(t *testing.T) {
+	opts := NewOptions()
+	assert.False(t, opts.EnforceCSRNodeClientDataAction)
+
+	flags := pflag.NewFlagSet("test", pflag.ContinueOnError)
+	opts.AddFlags(flags)
+	assert.NoError(t, flags.Parse([]string{"--azure.enforce-csr-nodeclient-data-action=true"}))
+	assert.True(t, opts.EnforceCSRNodeClientDataAction)
+}
 
 func TestValidateFleetID(t *testing.T) {
 	tests := []struct {

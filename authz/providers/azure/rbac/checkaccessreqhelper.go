@@ -52,12 +52,14 @@ const (
 	ServicesResource            = "services"
 	NodesResource               = "nodes"
 	ServiceAccountsResource     = "serviceaccounts"
+	CSRResource                 = "certificatesigningrequests"
 	CustomResources             = "customresources"
 	ProxySubresource            = "proxy"
 	AttachSubresource           = "attach"
 	PortForwardSubresource      = "portforward"
 	ExecSubresource             = "exec"
 	TokenSubresource            = "token"
+	NodeClientSubresource       = "nodeclient"
 	ReadVerb                    = "read"
 	WriteVerb                   = "write"
 	DeleteVerb                  = "delete"
@@ -277,6 +279,11 @@ func getActionName(verb string) string {
 // object. Collapsing it into serviceaccounts/write would grant token issuance
 // to every principal that can create or update ServiceAccount objects, which
 // upstream Kubernetes RBAC does not do.
+//
+// certificatesigningrequests/nodeclient is the authorization gate used by the
+// upstream CSR approver before issuing a kubelet client certificate. Collapsing
+// it into certificatesigningrequests/write would let general CSR writers pass
+// this credential-issuance check.
 var securitySensitiveSubresources = map[string]map[string]struct{}{
 	PodsResource: {
 		ExecSubresource:        {},
@@ -293,18 +300,33 @@ var securitySensitiveSubresources = map[string]map[string]struct{}{
 	ServiceAccountsResource: {
 		TokenSubresource: {},
 	},
+	CSRResource: {
+		NodeClientSubresource: {},
+	},
 }
 
-func getResourceAndAction(resource string, subResource string, verb string) string {
-	if subs, ok := securitySensitiveSubresources[resource]; ok && subResource != "" {
-		if _, sensitive := subs[subResource]; sensitive {
-			return path.Join(resource, subResource, "action")
-		}
+func getResourceAndAction(resource string, subResource string, verb string, enforceCSRNodeClientDataAction bool) string {
+	if shouldPreserveSubresource(resource, subResource, enforceCSRNodeClientDataAction) {
+		return path.Join(resource, subResource, "action")
 	}
 	return path.Join(resource, getActionName(verb))
 }
 
-func getDataActions(ctx context.Context, subRevReq *authzv1.SubjectAccessReviewSpec, clusterType string, allowCustomResourceTypeCheck bool, allowSubresourceTypeCheck bool) ([]azureutils.AuthorizationActionInfo, error) {
+func shouldPreserveSubresource(resource string, subResource string, enforceCSRNodeClientDataAction bool) bool {
+	if resource == CSRResource && subResource == NodeClientSubresource {
+		return enforceCSRNodeClientDataAction
+	}
+
+	subResources, ok := securitySensitiveSubresources[resource]
+	if !ok {
+		return false
+	}
+
+	_, ok = subResources[subResource]
+	return ok
+}
+
+func getDataActions(ctx context.Context, subRevReq *authzv1.SubjectAccessReviewSpec, clusterType string, allowCustomResourceTypeCheck bool, allowSubresourceTypeCheck bool, enforceCSRNodeClientDataAction bool) ([]azureutils.AuthorizationActionInfo, error) {
 	var authInfoList []azureutils.AuthorizationActionInfo
 	var err error
 	log := klog.FromContext(ctx)
@@ -345,7 +367,7 @@ func getDataActions(ctx context.Context, subRevReq *authzv1.SubjectAccessReviewS
 				authInfoSingle.AuthorizationEntity.Id = path.Join(authInfoSingle.AuthorizationEntity.Id, subRevReq.ResourceAttributes.Group)
 			}
 
-			action := getResourceAndAction(subRevReq.ResourceAttributes.Resource, subRevReq.ResourceAttributes.Subresource, subRevReq.ResourceAttributes.Verb)
+			action := getResourceAndAction(subRevReq.ResourceAttributes.Resource, subRevReq.ResourceAttributes.Subresource, subRevReq.ResourceAttributes.Verb, enforceCSRNodeClientDataAction)
 			authInfoSingle.AuthorizationEntity.Id = path.Join(authInfoSingle.AuthorizationEntity.Id, action)
 			if allowSubresourceTypeCheck {
 				err = setAuthInfoSubresourceAttributes(&authInfoSingle, subRevReq)
@@ -648,13 +670,13 @@ func defaultDir(s string) string {
 	return "-" // invalid for a namespace
 }
 
-func getResultCacheKey(subRevReq *authzv1.SubjectAccessReviewSpec, allowSubresourceTypeCheck bool) string {
+func getResultCacheKey(subRevReq *authzv1.SubjectAccessReviewSpec, allowSubresourceTypeCheck bool, enforceCSRNodeClientDataAction bool) string {
 	cacheKey := subRevReq.User
 
 	if subRevReq.ResourceAttributes != nil {
 		cacheKey = path.Join(cacheKey, defaultDir(subRevReq.ResourceAttributes.Namespace))
 		cacheKey = path.Join(cacheKey, defaultDir(subRevReq.ResourceAttributes.Group))
-		action := getResourceAndAction(subRevReq.ResourceAttributes.Resource, subRevReq.ResourceAttributes.Subresource, subRevReq.ResourceAttributes.Verb)
+		action := getResourceAndAction(subRevReq.ResourceAttributes.Resource, subRevReq.ResourceAttributes.Subresource, subRevReq.ResourceAttributes.Verb, enforceCSRNodeClientDataAction)
 		cacheKey = path.Join(cacheKey, action)
 
 		// Cache results for subresources of interest separately
@@ -670,7 +692,7 @@ func getResultCacheKey(subRevReq *authzv1.SubjectAccessReviewSpec, allowSubresou
 	return cacheKey
 }
 
-func prepareCheckAccessRequestBody(ctx context.Context, req *authzv1.SubjectAccessReviewSpec, clusterType string, resourceId string, useNamespaceResourceScopeFormat bool, allowCustomResourceTypeCheck bool, allowSubresourceTypeCheck bool) ([]*CheckAccessRequest, error) {
+func prepareCheckAccessRequestBody(ctx context.Context, req *authzv1.SubjectAccessReviewSpec, clusterType string, resourceId string, useNamespaceResourceScopeFormat bool, allowCustomResourceTypeCheck bool, allowSubresourceTypeCheck bool, enforceCSRNodeClientDataAction bool) ([]*CheckAccessRequest, error) {
 	/* This is how sample SubjectAccessReview request will look like
 		{
 			"kind": "SubjectAccessReview",
@@ -733,7 +755,7 @@ func prepareCheckAccessRequestBody(ctx context.Context, req *authzv1.SubjectAcce
 		return nil, errutils.WithCode(fmt.Errorf("oid info not sent from authentication module"), http.StatusBadRequest)
 	}
 	groups := getValidSecurityGroups(req.Groups)
-	actions, err := getDataActions(ctx, req, clusterType, allowCustomResourceTypeCheck, allowSubresourceTypeCheck)
+	actions, err := getDataActions(ctx, req, clusterType, allowCustomResourceTypeCheck, allowSubresourceTypeCheck, enforceCSRNodeClientDataAction)
 	if err != nil {
 		return nil, errutils.WithCode(fmt.Errorf("Error while creating list of dataactions for check access call: %w", err), http.StatusInternalServerError)
 	}
