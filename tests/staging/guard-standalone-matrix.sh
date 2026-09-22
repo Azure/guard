@@ -46,6 +46,15 @@ WORKDIR="$(mktemp -d)"
 PASS=0
 FAIL=0
 
+# setup_client extracts the cluster's real mTLS client key into WORKDIR, so the
+# directory must not outlive the run. The trap covers the abort paths too: die()
+# exits non-zero, and `set -e` can end the script from any assertion.
+cleanup_workdir() {
+    [[ -n "${WORKDIR:-}" && -d "$WORKDIR" ]] && rm -rf "$WORKDIR"
+    return 0
+}
+trap cleanup_workdir EXIT INT TERM
+
 log() { printf '  %s\n' "$*" >&2; }
 step() { printf '\n== %s ==\n' "$*" >&2; }
 die() {
