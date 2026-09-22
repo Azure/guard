@@ -203,7 +203,7 @@ func printResults(results []Result) {
 // actually contains is the interesting part. A refusal reverses that, because
 // the reason is what matters.
 func resultDetail(result Result) string {
-	if result.Outcome == OutcomeRefused {
+	if result.Outcome == OutcomeRefused || result.Outcome == OutcomeError {
 		return collapse(result.Detail)
 	}
 	if result.Claims != nil {
@@ -221,9 +221,11 @@ func printVerdicts(results []Result) {
 	printControlCheck(results)
 
 	fmt.Printf("\nnotes\n")
-	fmt.Printf("  REFUSED means Entra issued the token but PDP would not accept it - the\n")
+	fmt.Printf("  REFUSED means Entra issued the token but PDP rejected it (401/403) - the\n")
 	fmt.Printf("  caller needs Microsoft.Authorization/checkAccess/action, available only\n")
 	fmt.Printf("  via a wildcard (Contributor).\n")
+	fmt.Printf("  ERROR means the CheckAccess call never returned a decision (404, 5xx,\n")
+	fmt.Printf("  transport or parse failure). That says nothing about the credential.\n")
 	fmt.Printf("  A PDP decision of either allowed or denied counts as success here: it\n")
 	fmt.Printf("  proves the call was authenticated and evaluated.\n")
 	fmt.Printf("  %s means no Federated Identity Credential matched - check that the FIC\n", tokenlab.ErrCodeNoFederatedRecord)

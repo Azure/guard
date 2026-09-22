@@ -32,11 +32,17 @@ const (
 	OutcomePass Outcome = "PASS"
 	OutcomeFail Outcome = "FAIL"
 	OutcomeSkip Outcome = "SKIP"
-	// OutcomeRefused means Entra issued the token but the resource server would
-	// not accept it. This is deliberately distinct from PASS: issuance and
-	// usability are different properties, and conflating them is how a harness
-	// reports success for a credential that does not actually work.
+	// OutcomeRefused means Entra issued the token but the resource server
+	// actively rejected it - a 401 or 403. This is deliberately distinct from
+	// PASS: issuance and usability are different properties, and conflating
+	// them is how a harness reports success for a credential that does not
+	// actually work.
 	OutcomeRefused Outcome = "REFUSED"
+	// OutcomeError means the verification call did not complete: a 404, a 5xx,
+	// a transport failure, or a body that could not be read or parsed. The
+	// token was never judged, so reporting it as REFUSED would blame the
+	// credential for an infrastructure fault.
+	OutcomeError Outcome = "ERROR"
 )
 
 // Question identifies which open question an experiment answers.
@@ -130,7 +136,12 @@ func (e Experiment) Run(ctx context.Context) Result {
 }
 
 // runVerify exercises the issued token against the real resource server and
-// downgrades the outcome if it is refused.
+// downgrades the outcome when the token is rejected.
+//
+// Only an authentication or authorization rejection is a refusal. A 404, a
+// 5xx, a transport failure or an unparseable body all mean the token was never
+// judged, and recording those as REFUSED would report a working credential as
+// broken.
 func (e Experiment) runVerify(ctx context.Context, token *tokenlab.Token, result *Result) {
 	if e.Verify == nil {
 		return
@@ -138,9 +149,12 @@ func (e Experiment) runVerify(ctx context.Context, token *tokenlab.Token, result
 
 	verified, err := e.Verify(ctx, token)
 	if err != nil {
-		// The token exists but is not usable. Report that plainly rather than
-		// letting a successful issuance stand in for a working credential.
-		result.Outcome = OutcomeRefused
+		var pdpErr *tokenlab.PDPError
+		if errors.As(err, &pdpErr) && pdpErr.TokenRejected() {
+			result.Outcome = OutcomeRefused
+		} else {
+			result.Outcome = OutcomeError
+		}
 		result.Detail = err.Error()
 		return
 	}
@@ -193,7 +207,7 @@ func SameAssertion(results []Result) bool {
 
 // Verdict summarises every result for one question into a single answer.
 func Verdict(question Question, results []Result) string {
-	var ran, passed, refused int
+	var ran, passed, refused, errored int
 	for _, result := range results {
 		if result.Experiment.Question != question || result.Outcome == OutcomeSkip {
 			continue
@@ -204,6 +218,8 @@ func Verdict(question Question, results []Result) string {
 			passed++
 		case OutcomeRefused:
 			refused++
+		case OutcomeError:
+			errored++
 		}
 	}
 
@@ -212,6 +228,9 @@ func Verdict(question Question, results []Result) string {
 		return "UNANSWERED - every experiment for this question was skipped"
 	case passed == ran:
 		return fmt.Sprintf("YES - all %d experiment(s) succeeded", ran)
+	case errored == ran:
+		// The credential was never judged, so this says nothing about it.
+		return fmt.Sprintf("UNANSWERED - all %d verification call(s) failed before a decision", ran)
 	case refused == ran:
 		return fmt.Sprintf("PARTIAL - all %d token(s) were issued but the resource server refused them", ran)
 	case passed == 0:
