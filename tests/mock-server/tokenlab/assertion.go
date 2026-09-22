@@ -110,7 +110,10 @@ func (s *CertificateSigner) Sign(audience string) (string, error) {
 // is the format Entra expects in the x5t header.
 func (s *CertificateSigner) thumbprint() string {
 	sum := sha1.Sum(s.certificate.Raw) // #nosec G401 - required format, not a security primitive
-	return base64.URLEncoding.EncodeToString(sum[:])
+	// RFC 7515 section 4.1.7 requires x5t to be base64url with no padding.
+	// base64.URLEncoding always pads, and a 20-byte SHA-1 sum encodes to exactly
+	// one trailing '=', which Entra rejects.
+	return base64.RawURLEncoding.EncodeToString(sum[:])
 }
 
 // newJTI generates the unique identifier that makes each assertion single-use.
