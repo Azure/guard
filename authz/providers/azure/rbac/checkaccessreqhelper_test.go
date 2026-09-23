@@ -175,11 +175,12 @@ func Test_getValidSecurityGroups(t *testing.T) {
 
 func Test_getDataActions(t *testing.T) {
 	type args struct {
-		isCrTest       bool
-		isSubresTest   bool
-		isWildcardTest bool
-		subRevReq      *authzv1.SubjectAccessReviewSpec
-		clusterType    string
+		isCrTest                       bool
+		isSubresTest                   bool
+		isWildcardTest                 bool
+		enforceCSRNodeClientDataAction bool
+		subRevReq                      *authzv1.SubjectAccessReviewSpec
+		clusterType                    string
 	}
 	tests := []struct {
 		name string
@@ -568,6 +569,41 @@ func Test_getDataActions(t *testing.T) {
 			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/pods/read"}, IsDataAction: true}},
 		},
 
+		{
+			"csrNodeclientAKS",
+			args{
+				isWildcardTest:                 false,
+				enforceCSRNodeClientDataAction: true,
+				subRevReq: &authzv1.SubjectAccessReviewSpec{
+					ResourceAttributes: &authzv1.ResourceAttributes{Group: "certificates.k8s.io", Resource: "certificatesigningrequests", Subresource: "nodeclient", Version: "v1", Verb: "create"},
+				}, clusterType: aksClusterType,
+			},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/certificates.k8s.io/certificatesigningrequests/nodeclient/action"}, IsDataAction: true}},
+		},
+
+		{
+			"csrNodeclientFleet",
+			args{
+				isWildcardTest:                 false,
+				enforceCSRNodeClientDataAction: true,
+				subRevReq: &authzv1.SubjectAccessReviewSpec{
+					ResourceAttributes: &authzv1.ResourceAttributes{Group: "certificates.k8s.io", Resource: "certificatesigningrequests", Subresource: "nodeclient", Version: "v1", Verb: "create"},
+				}, clusterType: "fleet",
+			},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "fleet/certificates.k8s.io/certificatesigningrequests/nodeclient/action"}, IsDataAction: true}},
+		},
+
+		{
+			"csrNodeclientLegacyMapping",
+			args{
+				isWildcardTest: false,
+				subRevReq: &authzv1.SubjectAccessReviewSpec{
+					ResourceAttributes: &authzv1.ResourceAttributes{Group: "certificates.k8s.io", Resource: "certificatesigningrequests", Subresource: "nodeclient", Version: "v1", Verb: "create"},
+				}, clusterType: aksClusterType,
+			},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/certificates.k8s.io/certificatesigningrequests/write"}, IsDataAction: true}},
+		},
+
 		// CSR with a non-sensitive subresource (e.g. approval, status)
 		// should still collapse to the base action, not preserve the subresource.
 		{
@@ -837,7 +873,7 @@ func Test_getDataActions(t *testing.T) {
 			setStoredOperationsMap(t, createOperationsMap(tt.args.clusterType))
 
 			ctx := context.Background()
-			got, _ := getDataActions(ctx, tt.args.subRevReq, tt.args.clusterType, tt.args.isCrTest, tt.args.isSubresTest)
+			got, _ := getDataActions(ctx, tt.args.subRevReq, tt.args.clusterType, tt.args.isCrTest, tt.args.isSubresTest, tt.args.enforceCSRNodeClientDataAction)
 			if !tt.args.isWildcardTest {
 				if !reflect.DeepEqual(got[0].AuthorizationEntity, tt.want[0].AuthorizationEntity) {
 					t.Errorf("getDataActions() = %v, want %v", got, tt.want)
@@ -916,7 +952,7 @@ func Test_getDataActions_wildcardWithEmptyOperationsMap(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
-			got, err := getDataActions(ctx, tt.spec, "Microsoft.ContainerService/managedClusters", false, false)
+			got, err := getDataActions(ctx, tt.spec, "Microsoft.ContainerService/managedClusters", false, false, false)
 
 			assert.Nil(t, got, "expected nil actions for wildcard with empty operations map")
 			assert.Error(t, err)
@@ -1000,7 +1036,7 @@ func Test_prepareCheckAccessRequestBody(t *testing.T) {
 	wantErr := errors.New("oid info not sent from authenticatoin module")
 
 	ctx := context.Background()
-	got, gotErr := prepareCheckAccessRequestBody(ctx, req, clusterType, resourceId, false, true, false)
+	got, gotErr := prepareCheckAccessRequestBody(ctx, req, clusterType, resourceId, false, true, false, false)
 
 	if got != nil && gotErr != wantErr {
 		t.Errorf("Want:%v WantErr:%v, got:%v, gotErr:%v", nil, wantErr, got, gotErr)
@@ -1010,7 +1046,7 @@ func Test_prepareCheckAccessRequestBody(t *testing.T) {
 	clusterType = "arc"
 	wantErr = errors.New("oid info sent from authenticatoin module is not valid")
 
-	got, gotErr = prepareCheckAccessRequestBody(ctx, req, clusterType, resourceId, false, true, false)
+	got, gotErr = prepareCheckAccessRequestBody(ctx, req, clusterType, resourceId, false, true, false, false)
 
 	if got != nil && gotErr != wantErr {
 		t.Errorf("Want:%v WantErr:%v, got:%v, gotErr:%v", nil, wantErr, got, gotErr)
@@ -1027,7 +1063,7 @@ func Test_prepareCheckAccessRequestBodyWithNamespace(t *testing.T) {
 	var want string = "resourceId/providers/Microsoft.KubernetesConfiguration/namespaces/dev"
 
 	ctx := context.Background()
-	got, gotErr := prepareCheckAccessRequestBody(ctx, req, clusterType, resourceId, true, true, false)
+	got, gotErr := prepareCheckAccessRequestBody(ctx, req, clusterType, resourceId, true, true, false, false)
 
 	if got == nil {
 		t.Errorf("Want: not nil Got: nil, gotErr:%v", gotErr)
@@ -1040,7 +1076,7 @@ func Test_prepareCheckAccessRequestBodyWithNamespace(t *testing.T) {
 	// testing with the old namespace format
 	want = "resourceId/namespaces/dev"
 
-	got, gotErr = prepareCheckAccessRequestBody(ctx, req, clusterType, resourceId, false, true, false)
+	got, gotErr = prepareCheckAccessRequestBody(ctx, req, clusterType, resourceId, false, true, false, false)
 	if got == nil {
 		t.Errorf("Want: not nil Got: nil, gotErr:%v", gotErr)
 	}
@@ -1070,7 +1106,7 @@ func Test_prepareCheckAccessRequestBodyWithCustomResource(t *testing.T) {
 	setStoredOperationsMap(t, createOperationsMap(clusterType))
 
 	ctx := context.Background()
-	got, _ := prepareCheckAccessRequestBody(ctx, req, clusterType, resourceId, false, true, false)
+	got, _ := prepareCheckAccessRequestBody(ctx, req, clusterType, resourceId, false, true, false, false)
 
 	if got == nil {
 		t.Errorf("Want: not nil Got: nil")
@@ -1110,7 +1146,7 @@ func Test_prepareCheckAccessRequestBodyWithCustomResourceOperationsMapEmpty(t *t
 	setStoredOperationsMap(t, azureutils.OperationsMap{})
 
 	ctx := context.Background()
-	got, _ := prepareCheckAccessRequestBody(ctx, req, clusterType, resourceId, false, true, false)
+	got, _ := prepareCheckAccessRequestBody(ctx, req, clusterType, resourceId, false, true, false, false)
 
 	if got == nil {
 		t.Errorf("Want: not nil Got: nil")
@@ -1142,7 +1178,7 @@ func Test_prepareCheckAccessRequestBodyWithCustomResourceTypeCheckDisabled(t *te
 	setStoredOperationsMap(t, operationsMap)
 
 	ctx := context.Background()
-	got, _ := prepareCheckAccessRequestBody(ctx, req, clusterType, resourceId, false, false, false)
+	got, _ := prepareCheckAccessRequestBody(ctx, req, clusterType, resourceId, false, false, false, false)
 
 	if got == nil {
 		t.Errorf("Want: not nil Got: nil")
@@ -1174,7 +1210,7 @@ func Test_prepareCheckAccessRequestBodyWithCustomResourceAndStars(t *testing.T) 
 	setStoredOperationsMap(t, operationsMap)
 
 	ctx := context.Background()
-	got, _ := prepareCheckAccessRequestBody(ctx, req, clusterType, resourceId, false, true, false)
+	got, _ := prepareCheckAccessRequestBody(ctx, req, clusterType, resourceId, false, true, false, false)
 
 	if got == nil {
 		t.Errorf("Want: not nil Got: nil")
@@ -1272,7 +1308,7 @@ func Test_prepareCheckAccessRequestBodyWithFleetMembers(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
-			got, gotErr := prepareCheckAccessRequestBody(ctx, tt.req, tt.clusterType, tt.resourceID, false, false, false)
+			got, gotErr := prepareCheckAccessRequestBody(ctx, tt.req, tt.clusterType, tt.resourceID, false, false, false, false)
 
 			if gotErr != nil {
 				t.Errorf("Unexpected error: %v", gotErr)
@@ -1334,7 +1370,7 @@ func Test_prepareCheckAccessRequestBodyWithSubresource(t *testing.T) {
 	clusterType := aksClusterType
 	createOperationsMap(clusterType)
 
-	got, _ := prepareCheckAccessRequestBody(context.Background(), req, clusterType, resourceId, false, false, true)
+	got, _ := prepareCheckAccessRequestBody(context.Background(), req, clusterType, resourceId, false, false, true, false)
 
 	if got == nil {
 		t.Errorf("Want: not nil Got: nil")
@@ -1374,7 +1410,7 @@ func Test_prepareCheckAccessRequestBodyWithSubresourceDisabled(t *testing.T) {
 	clusterType := aksClusterType
 	createOperationsMap(clusterType)
 
-	got, _ := prepareCheckAccessRequestBody(context.Background(), req, clusterType, resourceId, false, false, false)
+	got, _ := prepareCheckAccessRequestBody(context.Background(), req, clusterType, resourceId, false, false, false, false)
 
 	if got == nil {
 		t.Errorf("Want: not nil Got: nil")
@@ -1391,8 +1427,9 @@ func Test_prepareCheckAccessRequestBodyWithSubresourceDisabled(t *testing.T) {
 
 func Test_getResultCacheKey(t *testing.T) {
 	type args struct {
-		subRevReq                 *authzv1.SubjectAccessReviewSpec
-		allowSubresourceTypeCheck bool
+		subRevReq                      *authzv1.SubjectAccessReviewSpec
+		allowSubresourceTypeCheck      bool
+		enforceCSRNodeClientDataAction bool
 	}
 	tests := []struct {
 		name string
@@ -1515,6 +1552,21 @@ func Test_getResultCacheKey(t *testing.T) {
 		},
 
 		{
+			"csrNodeclientEnforced",
+			args{
+				subRevReq: &authzv1.SubjectAccessReviewSpec{
+					User: "node@example.com",
+					ResourceAttributes: &authzv1.ResourceAttributes{
+						Group: "certificates.k8s.io", Resource: "certificatesigningrequests",
+						Subresource: "nodeclient", Version: "v1", Verb: "create",
+					},
+				},
+				enforceCSRNodeClientDataAction: true,
+			},
+			"node@example.com/-/certificates.k8s.io/certificatesigningrequests/nodeclient/action",
+		},
+
+		{
 			"allStar",
 			args{
 				subRevReq: &authzv1.SubjectAccessReviewSpec{
@@ -1546,7 +1598,7 @@ func Test_getResultCacheKey(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := getResultCacheKey(tt.args.subRevReq, tt.args.allowSubresourceTypeCheck); got != tt.want {
+			if got := getResultCacheKey(tt.args.subRevReq, tt.args.allowSubresourceTypeCheck, tt.args.enforceCSRNodeClientDataAction); got != tt.want {
 				t.Errorf("getResultCacheKey() = %v, want %v", got, tt.want)
 			}
 		})
