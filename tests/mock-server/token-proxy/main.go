@@ -110,7 +110,11 @@ func parseFlags() options {
 	var legacyClientID string
 
 	flag.IntVar(&opts.port, "port", defaultPort, "HTTP listen port")
-	flag.StringVar(&opts.mode, "mode", string(tokenlab.ModeFIC), "credential mode: cert, fic or imds")
+	// IMDS is the default because it is what the documented invocation in
+	// authz/providers/azure/README.md relies on: `token-proxy --client-id ...`
+	// with no --mode. Defaulting to anything else silently sends that command
+	// into a mode whose required tenant and application ids were never passed.
+	flag.StringVar(&opts.mode, "mode", string(tokenlab.ModeIMDS), "credential mode: cert, fic or imds")
 	flag.StringVar(&opts.apiVersion, "endpoint", string(tokenlab.APIVersionV1), "Entra token endpoint version: v1 (production parity) or v2")
 	flag.StringVar(&opts.tenantID, "tenant-id", "", "Entra tenant ID (required for cert and fic modes)")
 	flag.StringVar(&opts.appClientID, "app-client-id", "", "client ID of the application being authenticated (required for cert and fic modes)")
