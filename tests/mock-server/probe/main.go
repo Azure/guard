@@ -30,6 +30,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -152,12 +153,21 @@ func (c *config) validate() error {
 // loadUserAssertion reads the delegated token used as the OBO `assertion`.
 // Returns an empty string when no file was configured, which downgrades the OBO
 // experiments to SKIP rather than failing the run.
+//
+// A configured path that does not exist is treated the same way. The Job mounts
+// the token from a Secret marked optional, so the path is always passed while
+// the file may legitimately be absent; aborting there would fail the whole
+// probe instead of skipping only the rows that need a user token. Any other
+// read error, such as a permission problem, is still reported.
 func (c *config) loadUserAssertion() (string, error) {
 	if c.userAssertion == "" {
 		return "", nil
 	}
 	raw, err := os.ReadFile(c.userAssertion) // #nosec G304 - operator-supplied path by design
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", nil
+		}
 		return "", fmt.Errorf("read user assertion: %w", err)
 	}
 	return strings.TrimSpace(string(raw)), nil
