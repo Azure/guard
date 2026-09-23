@@ -215,22 +215,45 @@ grant_checkaccess_role() {
 
 # create_federated_credential is the trust link that lets Entra accept the
 # managed identity's token as proof of the application's identity.
+#
+# A credential is matched on every field that governs the exchange, not on its
+# name alone. Reusing the name would keep a stale issuer, subject or audience
+# from an earlier cluster or identity, and that only surfaces much later as a
+# rejected exchange.
 create_federated_credential() {
     local app_id="$1" name="$2" subject="$3"
+    local issuer="https://login.microsoftonline.com/${TENANT_ID}/v2.0"
+    local audience="api://AzureADTokenExchange"
+    local existing
 
-    if az ad app federated-credential show --id "$app_id" --federated-credential-id "$name" >/dev/null 2>&1; then
-        log "federated credential $name already exists"
-        return
+    if existing=$(az ad app federated-credential show --id "$app_id" \
+        --federated-credential-id "$name" -o json 2>/dev/null); then
+
+        local current_issuer current_subject current_audience
+        current_issuer=$(printf '%s' "$existing" | jq -r '.issuer // ""')
+        current_subject=$(printf '%s' "$existing" | jq -r '.subject // ""')
+        current_audience=$(printf '%s' "$existing" | jq -r '.audiences[0] // ""')
+
+        if [[ "$current_issuer" == "$issuer" &&
+            "$current_subject" == "$subject" &&
+            "$current_audience" == "$audience" ]]; then
+            log "federated credential $name already matches (subject=$subject)"
+            return
+        fi
+
+        log "federated credential $name is stale (subject=$current_subject, want $subject); recreating"
+        az ad app federated-credential delete --id "$app_id" \
+            --federated-credential-id "$name" >/dev/null
     fi
 
     # subject MUST be the managed identity's OBJECT (principal) id, not its client
     # id. A wrong value still creates successfully and only fails at exchange time
-    # with AADSTS70021, so it is worth double-checking against the log line above.
+    # with AADSTS700213, so it is worth double-checking against the log line above.
     az ad app federated-credential create --id "$app_id" --parameters "{
     \"name\": \"${name}\",
-    \"issuer\": \"https://login.microsoftonline.com/${TENANT_ID}/v2.0\",
+    \"issuer\": \"${issuer}\",
     \"subject\": \"${subject}\",
-    \"audiences\": [\"api://AzureADTokenExchange\"]
+    \"audiences\": [\"${audience}\"]
   }" >/dev/null
 
     log "created federated credential $name (subject=$subject)"
