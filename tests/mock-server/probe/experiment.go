@@ -94,6 +94,11 @@ type Result struct {
 	Detail      string
 	Claims      *tokenlab.Claims
 	AssertionFP string
+	// VerifyAttempted records that Verify was actually invoked. A row whose
+	// Acquire failed never reaches runVerify, and without this the summary
+	// cannot tell "the call was made and gave nothing back" from "no call was
+	// ever made".
+	VerifyAttempted bool
 	// Verified holds the resource server's answer when Verify ran.
 	Verified string
 }
@@ -146,6 +151,7 @@ func (e Experiment) runVerify(ctx context.Context, token *tokenlab.Token, result
 	if e.Verify == nil {
 		return
 	}
+	result.VerifyAttempted = true
 
 	verified, err := e.Verify(ctx, token)
 	if err != nil {
@@ -242,12 +248,16 @@ func Verdict(question Question, results []Result) string {
 
 // PDPVerdict answers the question this harness exists for: did a real
 // CheckAccess call, made with a token we minted, come back with a decision?
+//
+// Only rows where verification actually ran are counted. A row whose Acquire
+// failed never reached runVerify, and counting it would report that a token
+// was put to PDP when no request was ever made.
 func PDPVerdict(results []Result) string {
 	var attempted, verified int
 	var evidence string
 
 	for _, result := range results {
-		if result.Experiment.Verify == nil || result.Outcome == OutcomeSkip {
+		if !result.VerifyAttempted {
 			continue
 		}
 		attempted++
@@ -263,7 +273,7 @@ func PDPVerdict(results []Result) string {
 	case attempted == 0:
 		return "NOT ATTEMPTED - no experiment called the PDP endpoint"
 	case verified == 0:
-		return fmt.Sprintf("NO - %d token(s) reached PDP and none were accepted", attempted)
+		return fmt.Sprintf("NO - %d CheckAccess call(s) were made and none returned a decision", attempted)
 	default:
 		return fmt.Sprintf("YES - PDP accepted the token and returned %s (%d/%d)", evidence, verified, attempted)
 	}
