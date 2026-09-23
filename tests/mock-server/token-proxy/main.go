@@ -14,187 +14,211 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// token-proxy acts as an OBO replacement for testing Guard against real PDP.
-// It receives Guard's OBO-style token requests and fulfills them by calling
-// Azure IMDS to get real PDP-audience tokens via a managed identity.
+// token-proxy stands in for the AKS OBO service so Guard can be pointed at a
+// different credential mechanism without modifying Guard.
 //
-// Production flow:  Guard -> OBO -> PDP
-// Test flow:        Guard -> token-proxy (IMDS) -> PDP
+// It speaks the same wire protocol as the production obo service, so it is a
+// drop-in replacement:
+//
+//	Production:  Guard -> obo (certificate-signed assertion) -> Entra -> Graph/PDP
+//	Prototype:   Guard -> token-proxy (--mode)               -> Entra -> Graph/PDP
+//
+// Modes:
+//
+//	cert  sign the client assertion with a certificate (reproduces production)
+//	fic   use a managed identity token as the client assertion (the design under test)
+//	imds  return the managed identity's own token; app-only paths only
 package main
 
 import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
-	"strconv"
-	"sync/atomic"
 	"time"
+
+	"go.kubeguard.dev/guard/tests/mock-server/tokenlab"
 )
 
-type config struct {
-	Port     int
-	ClientID string
-}
+const (
+	defaultPort = 8080
+	// defaultAuthzResource mirrors the production obo default, which falls back
+	// to the ARM endpoint when the caller does not name a resource.
+	defaultAuthzResource = "https://management.azure.com"
+	defaultOBOResource   = "https://graph.microsoft.com"
 
-type oboRequest struct {
-	TenantID    string `json:"tenantID,omitempty"`
-	AccessToken string `json:"accessToken,omitempty"`
-	Resource    string `json:"resource,omitempty"`
-}
-
-type oboResponse struct {
-	TokenType string `json:"token_type"`
-	Token     string `json:"access_token"`
-	ExpiresOn int64  `json:"expires_on"`
-}
-
-type imdsTokenResponse struct {
-	AccessToken string `json:"access_token"`
-	ExpiresOn   string `json:"expires_on"`
-	Resource    string `json:"resource"`
-	TokenType   string `json:"token_type"`
-}
-
-var (
-	cfg          config
-	tokensIssued atomic.Int64
+	readTimeout     = 15 * time.Second
+	writeTimeout    = 30 * time.Second
+	shutdownTimeout = 5 * time.Second
 )
 
-func handleOBOToken(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		log.Printf("[ERROR] Failed to read request body: %v", err)
-		http.Error(w, "failed to read body", http.StatusBadRequest)
-		return
-	}
-	defer func() { _ = r.Body.Close() }()
-
-	var req oboRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		log.Printf("[ERROR] Failed to parse request: %v", err)
-		http.Error(w, "invalid request", http.StatusBadRequest)
-		return
-	}
-
-	resource := req.Resource
-	if resource == "" {
-		resource = "https://management.azure.com"
-	}
-
-	log.Printf("[OBO] Received token request: path=%s tenantID=%s resource=%s", r.URL.Path, req.TenantID, resource)
-
-	imdsToken, err := getIMDSToken(resource, cfg.ClientID)
-	if err != nil {
-		log.Printf("[ERROR] IMDS token acquisition failed: resource=%s err=%v", resource, err)
-		http.Error(w, fmt.Sprintf("IMDS token error: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	expiresOn, err := strconv.ParseInt(imdsToken.ExpiresOn, 10, 64)
-	if err != nil {
-		log.Printf("[ERROR] Failed to parse expires_on=%s: %v", imdsToken.ExpiresOn, err)
-		http.Error(w, "invalid expiry from IMDS", http.StatusInternalServerError)
-		return
-	}
-
-	resp := oboResponse{
-		TokenType: "Bearer",
-		Token:     imdsToken.AccessToken,
-		ExpiresOn: expiresOn,
-	}
-
-	count := tokensIssued.Add(1)
-	log.Printf("[OBO] Token issued: path=%s resource=%s expires=%s total=%d",
-		r.URL.Path, resource, time.Unix(expiresOn, 0).Format(time.RFC3339), count)
-
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(resp); err != nil {
-		log.Printf("[ERROR] Failed to encode response: %v", err)
-	}
-}
-
-func getIMDSToken(resource, clientID string) (*imdsTokenResponse, error) {
-	imdsURL := fmt.Sprintf(
-		"http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=%s&client_id=%s",
-		resource, clientID,
-	)
-
-	req, err := http.NewRequest(http.MethodGet, imdsURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("create IMDS request: %w", err)
-	}
-	req.Header.Set("Metadata", "true")
-
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("IMDS request failed: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("IMDS returned %d: %s", resp.StatusCode, string(body))
-	}
-
-	var tokenResp imdsTokenResponse
-	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
-		return nil, fmt.Errorf("decode IMDS response: %w", err)
-	}
-
-	return &tokenResp, nil
-}
-
-func handleHealth(w http.ResponseWriter, _ *http.Request) {
-	_, _ = w.Write([]byte("OK"))
-}
-
-func handleMetrics(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"tokens_issued": tokensIssued.Load(),
-		"client_id":     cfg.ClientID,
-		"port":          cfg.Port,
-	})
+type options struct {
+	port              int
+	mode              string
+	apiVersion        string
+	tenantID          string
+	appClientID       string
+	miClientID        string
+	certFile          string
+	keyFile           string
+	oboResource       string
+	authzResource     string
+	imdsEndpoint      string
+	authorityHost     string
+	dumpClaims        bool
+	passthroughErrors bool
 }
 
 func main() {
-	flag.IntVar(&cfg.Port, "port", 8080, "HTTP listen port")
-	flag.StringVar(&cfg.ClientID, "client-id", "", "Managed identity client ID for IMDS token requests (required)")
-	flag.Parse()
+	opts := parseFlags()
 
-	if cfg.ClientID == "" {
-		log.Fatal("--client-id is required (managed identity client ID)")
+	server, err := buildServer(opts)
+	if err != nil {
+		log.Fatalf("configuration error: %s", err)
 	}
 
 	mux := http.NewServeMux()
-
-	// OBO-compatible endpoints (Guard sends requests to these)
-	mux.HandleFunc("/v1/", handleOBOToken)
-	mux.HandleFunc("/authz/token", handleOBOToken)
-
+	// Guard's URLs are /v1/<ccpid>/token and /v1/<ccpid>/authztoken; the handler
+	// dispatches on the suffix because the ccpid segment is arbitrary.
+	mux.HandleFunc("/v1/", server.Route)
+	// Legacy path used by older Guard builds; it is the app-only exchange.
+	mux.HandleFunc("/authz/token", server.ServeAuthzToken)
 	mux.HandleFunc("/health", handleHealth)
-	mux.HandleFunc("/metrics", handleMetrics)
+	mux.HandleFunc("/metrics", handleMetrics(server))
 
-	addr := fmt.Sprintf(":%d", cfg.Port)
-	log.Printf("Token proxy starting on %s (client-id=%s)", addr, cfg.ClientID)
-	log.Printf("Routes: /v1/<ccpid>/authztoken (OBO), /authz/token (legacy), /health, /metrics")
+	listen := fmt.Sprintf(":%d", opts.port)
+	log.Printf("token-proxy listening on %s mode=%s endpoint=%s identity=%s application=%s",
+		listen, opts.mode, opts.apiVersion, opts.miClientID, opts.appClientID)
+	log.Printf("routes: /v1/<ccpid>/token (delegated), /v1/<ccpid>/authztoken (app-only), /health, /metrics")
 
-	server := &http.Server{
-		Addr:         addr,
-		Handler:      mux,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
+	httpServer := &http.Server{
+		Addr:              listen,
+		Handler:           mux,
+		ReadHeaderTimeout: readTimeout,
+		ReadTimeout:       readTimeout,
+		WriteTimeout:      writeTimeout,
 	}
-	if err := server.ListenAndServe(); err != nil {
-		log.Fatalf("Server failed: %v", err)
+
+	if err := httpServer.ListenAndServe(); err != nil {
+		log.Fatalf("server stopped: %s", err)
+	}
+}
+
+func parseFlags() options {
+	var opts options
+	var legacyClientID string
+
+	flag.IntVar(&opts.port, "port", defaultPort, "HTTP listen port")
+	// IMDS is the default because it is what the documented invocation in
+	// authz/providers/azure/README.md relies on: `token-proxy --client-id ...`
+	// with no --mode. Defaulting to anything else silently sends that command
+	// into a mode whose required tenant and application ids were never passed.
+	flag.StringVar(&opts.mode, "mode", string(tokenlab.ModeIMDS), "credential mode: cert, fic or imds")
+	flag.StringVar(&opts.apiVersion, "endpoint", string(tokenlab.APIVersionV1), "Entra token endpoint version: v1 (production parity) or v2")
+	flag.StringVar(&opts.tenantID, "tenant-id", "", "Entra tenant ID (required for cert and fic modes)")
+	flag.StringVar(&opts.appClientID, "app-client-id", "", "client ID of the application being authenticated (required for cert and fic modes)")
+	flag.StringVar(&opts.miClientID, "mi-client-id", "", "client ID of the managed identity used via IMDS")
+	flag.StringVar(&legacyClientID, "client-id", "", "deprecated alias for --mi-client-id")
+	flag.StringVar(&opts.certFile, "cert-file", "", "PEM certificate (cert mode)")
+	flag.StringVar(&opts.keyFile, "key-file", "", "PEM private key (cert mode; defaults to --cert-file)")
+	flag.StringVar(&opts.oboResource, "obo-resource", defaultOBOResource, "default downstream resource for the delegated endpoint")
+	flag.StringVar(&opts.authzResource, "authz-resource", defaultAuthzResource, "fallback resource for the app-only endpoint when the request omits one")
+	flag.StringVar(&opts.imdsEndpoint, "imds-endpoint", "", "override the IMDS token endpoint (testing only)")
+	flag.StringVar(&opts.authorityHost, "authority-host", "", "override the Entra authority host (sovereign clouds)")
+	flag.BoolVar(&opts.dumpClaims, "dump-claims", true, "log the decoded claims of every issued token")
+	flag.BoolVar(&opts.passthroughErrors, "passthrough-errors", true, "return Entra's status and body to Guard so the AADSTS code reaches kubectl")
+	flag.Parse()
+
+	// The documented recipe in authz/providers/azure/README.md passes
+	// --client-id; keep it working rather than breaking an existing runbook.
+	if opts.miClientID == "" {
+		opts.miClientID = legacyClientID
+	}
+
+	return opts
+}
+
+// buildServer validates the options and wires the credential for the chosen
+// mode. Requirements differ by mode, so validation is mode-aware rather than
+// demanding every flag up front.
+func buildServer(opts options) (*Server, error) {
+	mode, err := tokenlab.ParseCredentialMode(opts.mode)
+	if err != nil {
+		return nil, err
+	}
+
+	if opts.miClientID == "" && mode != tokenlab.ModeCert {
+		return nil, fmt.Errorf("--mi-client-id is required for mode %s", mode)
+	}
+
+	imds := tokenlab.NewIMDSClient(opts.imdsEndpoint, opts.miClientID)
+	server := &Server{
+		mode:              mode,
+		imds:              imds,
+		oboResource:       opts.oboResource,
+		authzResource:     opts.authzResource,
+		passthroughErrors: opts.passthroughErrors,
+		dumpClaims:        opts.dumpClaims,
+	}
+
+	if mode == tokenlab.ModeIMDS {
+		// No Entra exchange happens in this mode, so no token client is needed.
+		return server, nil
+	}
+
+	credential, err := buildCredential(mode, opts)
+	if err != nil {
+		return nil, err
+	}
+
+	client, err := tokenlab.NewTokenClient(tokenlab.TokenClientConfig{
+		AuthorityHost: opts.authorityHost,
+		TenantID:      opts.tenantID,
+		ClientID:      opts.appClientID,
+		APIVersion:    tokenlab.APIVersion(opts.apiVersion),
+		Credential:    credential,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	server.issuer = client
+	return server, nil
+}
+
+func buildCredential(mode tokenlab.CredentialMode, opts options) (tokenlab.ClientCredential, error) {
+	if mode == tokenlab.ModeFIC {
+		return tokenlab.NewFederatedCredential(tokenlab.NewIMDSClient(opts.imdsEndpoint, opts.miClientID)), nil
+	}
+
+	if opts.certFile == "" {
+		return nil, fmt.Errorf("--cert-file is required for mode %s", tokenlab.ModeCert)
+	}
+
+	keyFile := opts.keyFile
+	if keyFile == "" {
+		keyFile = opts.certFile
+	}
+
+	signer, err := tokenlab.NewCertificateSignerFromPEM(opts.appClientID, opts.certFile, keyFile)
+	if err != nil {
+		return nil, err
+	}
+	return tokenlab.NewCertificateCredential(signer), nil
+}
+
+func handleHealth(w http.ResponseWriter, _ *http.Request) {
+	if _, err := w.Write([]byte("OK")); err != nil {
+		log.Printf("[health] status=error detail=%q", err.Error())
+	}
+}
+
+func handleMetrics(server *Server) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(server.Stats()); err != nil {
+			log.Printf("[metrics] status=error detail=%q", err.Error())
+		}
 	}
 }
