@@ -189,26 +189,42 @@ func (e Experiment) assertionFingerprint() string {
 }
 
 // SameAssertion reports whether every non-skipped result in the set presented
-// the identical client assertion.
+// the identical client assertion, and why it cannot say so when it cannot.
 //
 // This is the guard on the headline conclusion. If Q1 passes and Q2 fails but
 // the two used different assertions, the difference in outcome cannot be
 // attributed to the grant type, and the result must not be read as an answer.
-func SameAssertion(results []Result) bool {
+//
+// Two observations are the minimum: with none or one there is nothing to
+// compare, and answering "same" there would assert the control held on no
+// evidence. A non-skipped row that recorded no digest is a failure rather than
+// something to skip past, because that is precisely the row which cannot be
+// shown to be comparable.
+func SameAssertion(results []Result) (bool, string) {
 	var seen string
+	var compared int
+
 	for _, result := range results {
-		if result.Outcome == OutcomeSkip || result.AssertionFP == "" {
+		if result.Outcome == OutcomeSkip {
 			continue
 		}
+		if result.AssertionFP == "" {
+			return false, fmt.Sprintf("%s recorded no client assertion digest", result.Experiment.Name)
+		}
+		compared++
 		if seen == "" {
 			seen = result.AssertionFP
 			continue
 		}
 		if seen != result.AssertionFP {
-			return false
+			return false, fmt.Sprintf("%s presented a different client assertion", result.Experiment.Name)
 		}
 	}
-	return true
+
+	if compared < 2 {
+		return false, fmt.Sprintf("only %d comparable row(s); at least 2 are needed", compared)
+	}
+	return true, ""
 }
 
 // Verdict summarises every result for one question into a single answer.

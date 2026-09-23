@@ -248,14 +248,15 @@ func printControlCheck(results []Result) {
 	}
 
 	fmt.Printf("\ncontrol\n")
-	if SameAssertion(federated) {
+	established, reason := SameAssertion(federated)
+	if established {
 		fmt.Printf("  OK   every federated row presented the same client assertion, so any\n")
 		fmt.Printf("       difference between Q1 and Q2 is attributable to the grant type.\n")
 		return
 	}
-	fmt.Printf("  WARN federated rows presented DIFFERENT client assertions (see ASSERTION\n")
-	fmt.Printf("       column). A Q1/Q2 difference cannot be attributed to the grant type;\n")
-	fmt.Printf("       re-run so the assertion cache covers the whole matrix.\n")
+	fmt.Printf("  WARN control not established: %s.\n", reason)
+	fmt.Printf("       A Q1/Q2 difference cannot be attributed to the grant type; re-run so\n")
+	fmt.Printf("       the assertion cache covers the whole matrix.\n")
 }
 
 func orDash(value string) string {
