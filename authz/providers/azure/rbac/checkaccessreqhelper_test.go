@@ -935,8 +935,8 @@ func Test_getDataActions_wildcardWithEmptyOperationsMap(t *testing.T) {
 	}
 }
 
-// Test_getDataActions_rejectsUnmappableRequests is the regression test for
-// MSRC 132259. Guard must not build a DataAction out of a verb it does not map or
+// Test_getDataActions_rejectsUnmappableRequests pins that Guard does not build a
+// DataAction out of a verb it does not map or
 // a path carrying a ".." segment: path.Join drops an empty final element and
 // path.Clean resolves "..", so either one lets distinct requests collapse onto the
 // same authorization question and the same cache entry. Neither can arise from a
@@ -1031,7 +1031,7 @@ func Test_getDataActions_rejectsUnmappableRequests(t *testing.T) {
 }
 
 // Test_getDataActions_acceptsMappableRequests pins the requests adjacent to the
-// rejections above, so the MSRC 132259 validation cannot be widened into the verbs
+// rejections above, so the unmappable-request validation cannot be widened into the verbs
 // and paths a real API server sends.
 func Test_getDataActions_acceptsMappableRequests(t *testing.T) {
 	setStoredOperationsMap(t, azureutils.NewOperationsMap())
@@ -1719,11 +1719,11 @@ func Test_getResultCacheKey_readVerbsShareCacheKey(t *testing.T) {
 	}
 }
 
-// Test_getResultCacheKey_noResourceNonResourceCollision is the regression test
-// for MSRC 132991. A non-resource path whose ".." segments normalize down to a
-// resource's path (e.g. "/apiz/../-/-/secrets") must NOT produce the same cache
-// key as the corresponding resource request (a cluster-wide list of secrets), so
-// a decision cached for one request is never served for a different one.
+// Test_getResultCacheKey_noResourceNonResourceCollision pins that a non-resource path
+// whose ".." segments normalize down to a resource's path (e.g. "/apiz/../-/-/secrets")
+// does not produce the same cache key as the corresponding resource request (a
+// cluster-wide list of secrets), so a decision cached for one request is never served
+// for a different one.
 func Test_getResultCacheKey_noResourceNonResourceCollision(t *testing.T) {
 	const user = "eve@contoso.com"
 

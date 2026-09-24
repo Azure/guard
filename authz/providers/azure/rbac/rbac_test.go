@@ -1169,20 +1169,14 @@ func TestCheckAccess_AIManagerFallback(t *testing.T) {
 	}
 }
 
-// Test_uppercaseNonResourceVerbCannotPlantACacheableAllow pins the reason the two
-// halves of MSRC 132259 have to land together.
-//
-// The discovery gate does not just return ALLOW, it writes that ALLOW into the
-// result cache (see azure.go), and it runs without any Azure CheckAccess call. So
-// while the gate accepted a case variant and getActionName mapped that variant to
-// no action, a "GET /healthz" review planted an ALLOW under a key built from an
-// empty action - which is the same key every other unmapped verb on that path
-// produces, "post" and "put" among them. The planted ALLOW was then served from
-// cache to a request the gate itself would never have allowed.
-//
-// Either half closes it, and both are asserted here: the gate must reject the
-// case variant, so nothing is planted, and an unmapped verb must not be able to
-// produce a decision that could be cached under the shared key.
+// Test_uppercaseNonResourceVerbCannotPlantACacheableAllow pins why the case-sensitive
+// gate and the unmappable-action rejection have to land together. The discovery gate
+// writes the ALLOW it returns into the result cache without any Azure CheckAccess
+// call, so while it accepted a case variant that getActionName mapped to no action, a
+// "GET /healthz" review planted an ALLOW under the empty-action key that every other
+// unmapped verb on that path also produces. Both halves are asserted here: the gate
+// must reject the case variant, and an unmapped verb must not yield a decision that
+// could be cached under the shared key.
 func Test_uppercaseNonResourceVerbCannotPlantACacheableAllow(t *testing.T) {
 	planter := &authzv1.SubjectAccessReviewSpec{
 		User:                  "eve@contoso.com",
@@ -1204,14 +1198,13 @@ func Test_uppercaseNonResourceVerbCannotPlantACacheableAllow(t *testing.T) {
 	assert.Error(t, consumeErr, "an unmapped verb must not yield a DataAction to check and cache")
 }
 
-// Test_AllowNonResPathDiscoveryAccess is the regression test for the discovery
-// half of MSRC 132991. The discovery exemption (which returns ALLOW with no Azure
-// RBAC check) must cover exactly the non-resource URLs of the upstream Kubernetes
-// "system:discovery" ClusterRole - "/api", "/api/*", "/apis", "/apis/*",
-// "/healthz", "/livez", "/openapi", "/openapi/*", "/readyz", "/version" and
-// "/version/" - where only the "*" entries match by prefix and the rest match
-// exactly. Subpaths of the exact-match entries, loose-prefix look-alikes, case
-// variants of either the path or the verb, and any path containing a ".."
+// Test_AllowNonResPathDiscoveryAccess pins the discovery exemption (which returns
+// ALLOW with no Azure RBAC check) to exactly the non-resource URLs of the upstream
+// "system:discovery" ClusterRole - "/api", "/api/*", "/apis", "/apis/*", "/healthz",
+// "/livez", "/openapi", "/openapi/*", "/readyz", "/version" and "/version/" - where
+// only the "*" entries match by prefix and the rest match exactly. Subpaths of the
+// exact-match entries, loose-prefix look-alikes, case variants of either the path or
+// the verb, and any path containing a ".."
 // traversal segment must not be exempted.
 func Test_AllowNonResPathDiscoveryAccess(t *testing.T) {
 	tests := []struct {
@@ -1242,7 +1235,7 @@ func Test_AllowNonResPathDiscoveryAccess(t *testing.T) {
 		// non-resource verb reaching an authorizer is already the lowercased HTTP
 		// method. Folding either here would exempt spellings upstream would not match
 		// and the API server would not route, and would put this gate out of step
-		// with the case-sensitive switch in getActionName (MSRC 132259).
+		// with the case-sensitive switch in getActionName.
 		{name: "uppercase path", path: "/HEALTHZ", verb: "get", allowDiscovery: true, want: false},
 		{name: "mixed case path", path: "/HealthZ", verb: "get", allowDiscovery: true, want: false},
 		{name: "uppercase prefix path", path: "/APIS/apps/v1", verb: "get", allowDiscovery: true, want: false},

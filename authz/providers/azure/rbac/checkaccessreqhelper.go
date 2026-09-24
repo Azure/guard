@@ -218,7 +218,7 @@ func getValidSecurityGroups(groups []string) []string {
 // the request states. nonResourceAttributes.path on a SelfSubjectAccessReview is
 // caller-controlled and is never routed by the API server, and a path the API
 // server did route is already normalized, so a ".." segment only ever appears on a
-// hand-built request (MSRC 132259).
+// hand-built request.
 func hasPathTraversalSegment(p string) bool {
 	for _, segment := range strings.Split(p, "/") {
 		if segment == ".." {
@@ -338,7 +338,7 @@ func getDataActions(ctx context.Context, subRevReq *authzv1.SubjectAccessReviewS
 		// createAuthorizationActionInfoList; rejecting it here keeps the single
 		// resource path consistent. The API server derives a resource verb from a
 		// closed set, so an unmapped one only reaches Guard on a hand-built
-		// SubjectAccessReview (MSRC 132259).
+		// SubjectAccessReview.
 		if getActionName(subRevReq.ResourceAttributes.Verb) == "" {
 			return nil, errutils.WithCode(
 				fmt.Errorf("no DataAction is defined for verb %q on resource %q", subRevReq.ResourceAttributes.Verb, subRevReq.ResourceAttributes.Resource),
@@ -416,7 +416,7 @@ func getDataActions(ctx context.Context, subRevReq *authzv1.SubjectAccessReviewS
 		// one cache entry, for a given path. A ".." segment is resolved by
 		// path.Clean, letting a caller-controlled path name a DataAction other than
 		// the one the request states. Neither can arise from a request the API
-		// server routed, so both are rejected rather than normalized (MSRC 132259).
+		// server routed, so both are rejected rather than normalized.
 		action := getActionName(attr.Verb)
 		if action == "" {
 			return nil, errutils.WithCode(
@@ -716,22 +716,12 @@ const (
 )
 
 // cacheKeyBuilder encodes the fields that identify a CheckAccess result into an
-// unambiguous byte string and hashes it. The layout follows buildKey in upstream
-// k8s.io/apiserver/pkg/endpoints/filters/impersonation/cache.go.
-//
-// Every variable-length field carries a uint32 big-endian length prefix, so no
-// field value can move a field boundary: two requests share an encoding only when
-// every field is byte-for-byte equal. Joining caller-influenced fields with a
-// separator instead leaves the boundaries ambiguous, because a field may contain
-// the separator, may be rewritten by normalization (path.Clean resolving ".."), or
-// may be replaced by a placeholder that another field can also spell (MSRC 132991).
-//
-// build appends the requestor's user name to the hash in clear text. The hash is
-// always 64 characters, so the suffix boundary is fixed and two keys are equal only
-// if their users are equal. The user name is set by the authenticator rather than
-// chosen by the caller, so a hash collision is only ever reachable among a single
-// user's own keys, where it cannot yield a permission that user does not already
-// hold. Hashing also bounds the key length regardless of caller-supplied input.
+// unambiguous byte string and hashes it, following buildKey in upstream
+// k8s.io/apiserver/pkg/endpoints/filters/impersonation/cache.go. Every variable-length
+// field carries a uint32 big-endian length prefix, so no field value can move a field
+// boundary and two requests share an encoding only when every field is byte-for-byte
+// equal. build appends the requestor's user name to the fixed-width digest in clear
+// text, so two keys are equal only if their users are equal.
 type cacheKeyBuilder struct {
 	user    string
 	builder []byte
@@ -771,13 +761,12 @@ func cachedSubresource(attr *authzv1.ResourceAttributes, allowSubresourceTypeChe
 	return ""
 }
 
-// getResultCacheKey returns the key under which the CheckAccess result for
-// subRevReq is cached. See cacheKeyBuilder for why the encoding is length-prefixed
-// and hashed rather than joined.
-//
-// The set of fields is unchanged, so cache hit rates are unaffected: the resource
-// branch keys on the derived action from getResourceAndAction, which maps get, list
-// and watch onto "read", and the non-resource branch keys on getActionName.
+// getResultCacheKey returns the key under which the CheckAccess result for the
+// SubjectAccessReview spec subRevReq is cached; see cacheKeyBuilder for why the
+// encoding is length-prefixed and hashed rather than joined. A resource request keys
+// on namespace, API group, the action derived by getResourceAndAction and the
+// subresource selected by cachedSubresource; a non-resource request keys on the path
+// and the action from getActionName.
 func getResultCacheKey(subRevReq *authzv1.SubjectAccessReviewSpec, allowSubresourceTypeCheck bool) string {
 	switch {
 	case subRevReq.ResourceAttributes != nil:
