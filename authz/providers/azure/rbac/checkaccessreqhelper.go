@@ -257,38 +257,17 @@ func getActionName(verb string) string {
 	}
 }
 
-// safeSubresources lists the subresources that upstream Kubernetes treats as
-// part of the parent resource's read/write permission: the read-only "view"
-// ClusterRole grants them alongside the parent resource (pods/log, pods/status,
-// deployments/scale, and the /status and /scale subresources generally). For
-// these, the subresource is collapsed into the base resource action
-// (<resource>/read, <resource>/write, ...).
-//
-// Every other subresource keeps its own DataAction
-// ("<resource>/<subresource>/action"). The default is deliberately the distinct
-// action rather than the collapsed one: a subresource that has not been
-// classified - including subresources added by future Kubernetes versions, by
-// CRDs, or by aggregated API servers - must not be silently covered by the
-// parent resource's permission.
-//
-// The subresources that were previously enumerated one by one fall out of the
-// safe set by construction and keep the mapping they had before: pods
-// exec/attach/portforward/proxy, services/proxy and nodes/proxy are granted
-// separately from base read/write in the upstream roles, and
-// serviceaccounts/token is the TokenRequest API, which upstream lists as its own
-// resource in the aggregate-to-edit ClusterRole ("create" on
-// "serviceaccounts/token", separate from the write rule on "serviceaccounts")
-// because issuing a bearer token for a ServiceAccount is a credential-minting
-// operation rather than an update of the ServiceAccount object.
-//
-// Special verbs (bind, escalate, use, impersonate, ...) already encode the
-// privileged operation in the action name, so getResourceAndAction leaves those
-// mappings unchanged.
+// safeSubresources are the subresources that upstream's read-only "view"
+// ClusterRole grants alongside their parent (pods/log, /status, /scale); these
+// collapse into the base resource action. Every other subresource - including
+// ones added later by Kubernetes, CRDs or aggregated API servers - gets its own
+// "<resource>/<subresource>/action", so it is never silently covered by the
+// parent's permission. This is why pods exec/attach/portforward/proxy,
+// services/proxy, nodes/proxy and serviceaccounts/token stay distinct.
 var safeSubresources = map[string]struct{}{
 	StatusSubresource: {},
 	ScaleSubresource:  {},
-	// Kubernetes names this subresource "log"; guard has historically also seen
-	// the plural spelling, so both are treated as the same read-only capability.
+	// "log" is the upstream name; guard has historically also seen "logs".
 	LogSubresource:  {},
 	LogsSubresource: {},
 }
@@ -296,14 +275,13 @@ var safeSubresources = map[string]struct{}{
 func getResourceAndAction(resource string, subResource string, verb string) string {
 	action := getActionName(verb)
 
-	// Nothing to preserve when there is no subresource, or when the request is a
-	// wildcard one (those are expanded from the operations map elsewhere).
+	// Wildcards are expanded from the operations map elsewhere.
 	if subResource == "" || subResource == wildcardValue || resource == wildcardValue || action == wildcardValue {
 		return path.Join(resource, action)
 	}
 
-	// Special verbs already encode the privileged operation in the action name;
-	// the verb, not the subresource, identifies what is being authorized.
+	// Special verbs already name the privileged operation, so the verb rather
+	// than the subresource identifies what is authorized.
 	if strings.HasSuffix(action, actionSuffix) {
 		return path.Join(resource, action)
 	}

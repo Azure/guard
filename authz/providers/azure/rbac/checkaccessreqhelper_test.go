@@ -374,8 +374,7 @@ func Test_getDataActions(t *testing.T) {
 			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "arc/batch/cronjobs/write"}, IsDataAction: true}},
 		},
 
-		// certificatesigningrequests/approvals is not a safe subresource, so it
-		// no longer collapses into the parent delete action.
+		// approvals is not safe, so it no longer collapses into the parent delete.
 		{
 			"aks6",
 			args{
@@ -544,9 +543,8 @@ func Test_getDataActions(t *testing.T) {
 			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/serviceaccounts/write"}, IsDataAction: true}},
 		},
 
-		// The impersonate verb already encodes the privileged operation in the
-		// action name and has no subresource, so it keeps resolving through the
-		// verb mapping rather than the safe-subresource check.
+		// The impersonate verb names the operation itself and has no subresource,
+		// so it resolves through the verb mapping, not the safe-subresource check.
 		{
 			"serviceAccountsImpersonateUnchanged",
 			args{
@@ -558,8 +556,7 @@ func Test_getDataActions(t *testing.T) {
 			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/serviceaccounts/impersonate/action"}, IsDataAction: true}},
 		},
 
-		// status is a safe subresource: it collapses to the parent read action so
-		// legitimate read-only access is not over-restricted.
+		// status is safe: it collapses to the parent read action.
 		{
 			"podsStatusSubresourceStillCollapsed",
 			args{
@@ -571,8 +568,7 @@ func Test_getDataActions(t *testing.T) {
 			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/pods/read"}, IsDataAction: true}},
 		},
 
-		// certificatesigningrequests/approval is not a safe subresource, so it
-		// gets its own DataAction instead of collapsing into the parent write.
+		// approval is not safe, so it gets its own action, not the parent write.
 		{
 			"csrApprovalSubresourceGetsOwnAction",
 			args{
@@ -584,8 +580,7 @@ func Test_getDataActions(t *testing.T) {
 			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/certificates.k8s.io/certificatesigningrequests/approval/action"}, IsDataAction: true}},
 		},
 
-		// Safe subresources collapse into the parent resource action: upstream's
-		// read-only view role grants them alongside the parent resource.
+		// Safe subresources collapse: upstream's view role grants them with the parent.
 		{
 			"podsLogSubresourceCollapses",
 			args{
@@ -608,9 +603,8 @@ func Test_getDataActions(t *testing.T) {
 			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/apps/deployments/write"}, IsDataAction: true}},
 		},
 
-		// An unclassified subresource - a new Kubernetes subresource, a CRD or an
-		// aggregated API - must NOT inherit the parent resource permission. This is
-		// the point of listing what is safe rather than what is sensitive.
+		// An unclassified subresource - future Kubernetes, a CRD, an aggregated
+		// API - must not inherit the parent's permission. This is the inversion.
 		{
 			"unknownSubresourceIsNotCollapsed",
 			args{
@@ -1491,9 +1485,8 @@ func cacheKeyDistinctCases() []cacheKeyCase {
 		resourceCase("user without the separator, long namespace", "a", "b/c", cacheKeyTestGroup),
 		subresourceCase("subresource check disabled", false),
 		subresourceCase("subresource check enabled", true),
-		// A subresource that is not on the safe list resolves to its own action,
-		// so it must not be answered from the parent resource's cache entry even
-		// when the subresource attribute itself is not carried on the key.
+		// An unsafe subresource resolves to its own action, so it must not share
+		// the parent's cache entry even though the subresource is not on the key.
 		{
 			name: "parent resource without a subresource",
 			subRevReq: &authzv1.SubjectAccessReviewSpec{
