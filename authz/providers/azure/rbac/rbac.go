@@ -115,6 +115,7 @@ type AccessInfo struct {
 
 	auditSAR               bool
 	fleetManagerResourceId string
+	aiManagerResourceId    string
 }
 
 var (
@@ -205,6 +206,7 @@ func newAccessInfo(tokenProvider graph.TokenProvider, rbacURL *url.URL, opts aut
 		httpClientRetryCount:                   authopts.HttpClientRetryCount,
 		auditSAR:                               opts.AuditSAR,
 		fleetManagerResourceId:                 opts.FleetManagerResourceId,
+		aiManagerResourceId:                    opts.AIManagerResourceId,
 		useCheckAccessV2:                       opts.UseCheckAccessV2,
 	}
 
@@ -353,12 +355,61 @@ func (a *AccessInfo) SetResultInCache(ctx context.Context, request *authzv1.Subj
 	return store.Set(key, result)
 }
 
-func (a *AccessInfo) AllowNonResPathDiscoveryAccess(request *authzv1.SubjectAccessReviewSpec) bool {
-	if request.NonResourceAttributes != nil && a.allowNonResDiscoveryPathAccess && strings.EqualFold(request.NonResourceAttributes.Verb, "get") {
-		path := strings.ToLower(request.NonResourceAttributes.Path)
-		if strings.HasPrefix(path, "/api") || strings.HasPrefix(path, "/openapi") || strings.HasPrefix(path, "/version") || strings.HasPrefix(path, "/healthz") {
+// discoveryExactPaths and discoveryPrefixPaths together reproduce the non-resource
+// URLs of the upstream Kubernetes "system:discovery" ClusterRole
+// (plugin/pkg/auth/authorizer/rbac/bootstrappolicy/policy.go), which upstream binds
+// to the system:authenticated group. Upstream evaluates a rule URL ending in "*" as
+// a prefix match with the "*" trimmed and every other rule URL as an exact string
+// match (rbacv1.NonResourceURLMatches), so "/api/*" contributes the "/api/" prefix
+// while "/healthz" and "/version" match only themselves. Guard must not exempt
+// anything outside this set, so paths such as "/healthz/etcd" or "/apiz" get a
+// regular Azure RBAC check instead (MSRC 132991).
+var discoveryExactPaths = map[string]struct{}{
+	"/api":      {},
+	"/apis":     {},
+	"/healthz":  {},
+	"/livez":    {},
+	"/openapi":  {},
+	"/readyz":   {},
+	"/version":  {},
+	"/version/": {},
+}
+
+// discoveryPrefixPaths are the upstream "/api/*", "/apis/*" and "/openapi/*" rules
+// with the trailing "*" trimmed, matched as prefixes exactly as upstream does.
+var discoveryPrefixPaths = []string{"/api/", "/apis/", "/openapi/"}
+
+// isNonResourceDiscoveryPath reports whether the lowercased non-resource path is one
+// of the discovery endpoints granted by the upstream "system:discovery" ClusterRole.
+// Guard is deliberately stricter than upstream on one point: a path containing a ".."
+// traversal segment is never treated as discovery. nonResourceAttributes.path on a
+// SelfSubjectAccessReview is fully caller-controlled and is never routed by the API
+// server, so without this check a path such as "/api/../.." would match the "/api/"
+// prefix rule and be exempted from the Azure RBAC check. Reporting false is not a
+// denial; the request falls through to the regular Azure RBAC check (MSRC 132991).
+func isNonResourceDiscoveryPath(lowerPath string) bool {
+	if lowerPath == "" {
+		return false
+	}
+	for _, segment := range strings.Split(lowerPath, "/") {
+		if segment == ".." {
+			return false
+		}
+	}
+	if _, ok := discoveryExactPaths[lowerPath]; ok {
+		return true
+	}
+	for _, prefix := range discoveryPrefixPaths {
+		if strings.HasPrefix(lowerPath, prefix) {
 			return true
 		}
+	}
+	return false
+}
+
+func (a *AccessInfo) AllowNonResPathDiscoveryAccess(request *authzv1.SubjectAccessReviewSpec) bool {
+	if request.NonResourceAttributes != nil && a.allowNonResDiscoveryPathAccess && strings.EqualFold(request.NonResourceAttributes.Verb, "get") {
+		return isNonResourceDiscoveryPath(strings.ToLower(request.NonResourceAttributes.Path))
 	}
 	return false
 }
@@ -589,6 +640,46 @@ func (a *AccessInfo) CheckAccess(ctx context.Context, request *authzv1.SubjectAc
 			if status != nil && status.Allowed {
 				log.V(5).Info("Fleet manager managed namespace check access allowed")
 			}
+		}
+	}
+
+	// Fallback to AI Manager scope check when a regular (BYO) cluster has joined an AI Manager.
+	// AI Manager namespaces are first-class ARM resources of type
+	// Microsoft.ContainerService/aiManagers/namespaces, so the plain namespaces/<ns>
+	// segment is used and there is no managedNamespaces sub-fallback.
+	if status != nil && status.Allowed {
+		return status, nil
+	}
+	if a.aiManagerResourceId != "" {
+		log.V(7).Info("Falling back to AI Manager scope check", "aiManagerResourceId", a.aiManagerResourceId)
+
+		aiManagerURL, err := buildCheckAccessURL(*a.apiURL, a.aiManagerResourceId, namespaceExists, nameSpaceString)
+		if err != nil {
+			return nil, fmt.Errorf("Failed to build AI Manager check access URL: %w", err)
+		}
+
+		bodiesForAIManagerRBAC, err := prepareCheckAccessRequestBody(ctx, request, aiManagers, a.aiManagerResourceId, false, a.allowCustomResourceTypeCheck, a.allowSubresourceTypeCheck)
+		if err != nil {
+			return nil, fmt.Errorf("Failed to prepare check access request for AI Manager: %w", err)
+		}
+
+		if namespaceExists {
+			for _, b := range bodiesForAIManagerRBAC {
+				b.Resource.Id = path.Join(a.aiManagerResourceId, nameSpaceString)
+			}
+		}
+
+		status, err = a.performCheckAccess(ctx, aiManagerURL, bodiesForAIManagerRBAC, checkAccessUsername)
+		if err != nil {
+			code := http.StatusInternalServerError
+			if v, ok := err.(errutils.HttpStatusCode); ok {
+				code = v.Code()
+			}
+			return nil, errutils.WithCode(fmt.Errorf("AI Manager check access failed: %w", err), code)
+		}
+		if status != nil && status.Allowed {
+			log.V(5).Info("AI Manager check access allowed")
+			return status, nil
 		}
 	}
 	return status, nil

@@ -10,6 +10,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: write
+
 jobs:
   build:
     name: Build
@@ -19,6 +22,19 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+
+      # `make release` needs version_strategy=tag, which the Makefile derives
+      # from `git describe --exact-match --tags`. Fail fast with a clear message
+      # instead of the opaque make error when HEAD carries no tag.
+      - name: Validate release tag
+        run: |
+          set -euo pipefail
+          tag=$(git describe --exact-match --tags --abbrev=0 2>/dev/null || true)
+          if [ -z "$tag" ]; then
+            echo "::error::HEAD has no tag reachable via 'git describe --exact-match --tags'. make release needs version_strategy=tag." >&2
+            exit 1
+          fi
+          echo "Releasing tag: $tag"
 
       - name: Print version info
         id: semver
@@ -50,7 +66,7 @@ jobs:
       - name: Determine tag
         id: tag
         run: |
-          TAG=$(git describe --exact-match --abbrev=0 2>/dev/null || echo "")
+          TAG=$(git describe --exact-match --tags --abbrev=0 2>/dev/null || echo "")
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
       - name: Release
@@ -58,6 +74,7 @@ jobs:
         if: steps.tag.outputs.tag != ''
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
+          generate_release_notes: true
           files: |
             bin/guard-darwin-amd64.tar.gz
             bin/guard-linux-amd64.tar.gz

@@ -1003,3 +1003,246 @@ type capturedCheckAccess struct {
 	resourceID string
 	actions    []azureutils.AuthorizationActionInfo
 }
+
+// getAPIServerAndAccessInfoForAIManager wires a fake ARM endpoint that returns
+// distinct responses for the primary cluster path vs the /aiManagers/ fallback path,
+// and captures the checkaccess request sent to the AI Manager scope.
+func getAPIServerAndAccessInfoForAIManager(
+	clusterType, resourceId, aiManagerResourceId string,
+	clusterStatus int, clusterBody string,
+	aiManagerStatus int, aiManagerBody string,
+	captured **capturedCheckAccess,
+) (*httptest.Server, *AccessInfo) {
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/aiManagers/") {
+			b, _ := io.ReadAll(r.Body)
+			var caReq CheckAccessRequest
+			_ = json.Unmarshal(b, &caReq)
+			*captured = &capturedCheckAccess{
+				url:        r.URL.Path,
+				resourceID: caReq.Resource.Id,
+				actions:    caReq.Actions,
+			}
+			w.WriteHeader(aiManagerStatus)
+			_, _ = w.Write([]byte(aiManagerBody))
+			return
+		}
+		w.WriteHeader(clusterStatus)
+		_, _ = w.Write([]byte(clusterBody))
+	}))
+	apiURL, _ := url.Parse(ts.URL)
+	u := &AccessInfo{
+		client:              httpclient.DefaultHTTPClient,
+		apiURL:              apiURL,
+		headers:             http.Header{},
+		expiresAt:           time.Now().Add(time.Hour),
+		clusterType:         clusterType,
+		azureResourceId:     resourceId,
+		aiManagerResourceId: aiManagerResourceId,
+		armCallLimit:        0,
+		lock:                sync.RWMutex{},
+		auditSAR:            true,
+	}
+	return ts, u
+}
+
+func TestCheckAccess_AIManagerFallback(t *testing.T) {
+	const (
+		clusterResourceId   = "/subscriptions/12345678-1234-1234-1234-123456789abc/resourceGroups/my-rg/providers/Microsoft.ContainerService/managedClusters/my-cluster"
+		aiManagerResourceId = "/subscriptions/12345678-1234-1234-1234-123456789abc/resourceGroups/my-rg/providers/Microsoft.ContainerService/aiManagers/my-aim"
+	)
+
+	type testCase struct {
+		name                   string
+		clusterStatus          int
+		clusterBody            string
+		aiManagerStatus        int
+		aiManagerBody          string
+		aiManagerResourceId    string
+		expectedAllowed        bool
+		expectedDenied         bool
+		expectedAIMCheckAccess bool
+		expectedAIMResourceID  string
+		expectedAIMActions     []string
+	}
+
+	tests := []testCase{
+		{
+			name:                   "cluster denied, AI Manager allowed",
+			clusterStatus:          http.StatusOK,
+			clusterBody:            `[{"accessDecision":"Denied","actionId":"Microsoft.ContainerService/managedClusters/pods/delete","isDataAction":true}]`,
+			aiManagerStatus:        http.StatusOK,
+			aiManagerBody:          `[{"accessDecision":"Allowed","actionId":"Microsoft.ContainerService/aiManagers/pods/delete","isDataAction":true}]`,
+			aiManagerResourceId:    aiManagerResourceId,
+			expectedAllowed:        true,
+			expectedDenied:         false,
+			expectedAIMCheckAccess: true,
+			expectedAIMResourceID:  aiManagerResourceId + "/namespaces/dev",
+			expectedAIMActions:     []string{"Microsoft.ContainerService/aiManagers/pods/delete"},
+		},
+		{
+			name:                   "cluster 404, AI Manager allowed",
+			clusterStatus:          http.StatusNotFound,
+			clusterBody:            `""`,
+			aiManagerStatus:        http.StatusOK,
+			aiManagerBody:          `[{"accessDecision":"Allowed","actionId":"Microsoft.ContainerService/aiManagers/pods/delete","isDataAction":true}]`,
+			aiManagerResourceId:    aiManagerResourceId,
+			expectedAllowed:        true,
+			expectedDenied:         false,
+			expectedAIMCheckAccess: true,
+			expectedAIMResourceID:  aiManagerResourceId + "/namespaces/dev",
+			expectedAIMActions:     []string{"Microsoft.ContainerService/aiManagers/pods/delete"},
+		},
+		{
+			name:                   "cluster denied, AI Manager denied",
+			clusterStatus:          http.StatusOK,
+			clusterBody:            `[{"accessDecision":"Denied","actionId":"Microsoft.ContainerService/managedClusters/pods/delete","isDataAction":true}]`,
+			aiManagerStatus:        http.StatusOK,
+			aiManagerBody:          `[{"accessDecision":"Denied","actionId":"Microsoft.ContainerService/aiManagers/pods/delete","isDataAction":true}]`,
+			aiManagerResourceId:    aiManagerResourceId,
+			expectedAllowed:        false,
+			expectedDenied:         true,
+			expectedAIMCheckAccess: true,
+			expectedAIMResourceID:  aiManagerResourceId + "/namespaces/dev",
+			expectedAIMActions:     []string{"Microsoft.ContainerService/aiManagers/pods/delete"},
+		},
+		{
+			name:                   "cluster allowed, no fallback attempted",
+			clusterStatus:          http.StatusOK,
+			clusterBody:            `[{"accessDecision":"Allowed","actionId":"Microsoft.ContainerService/managedClusters/pods/delete","isDataAction":true}]`,
+			aiManagerStatus:        http.StatusOK,
+			aiManagerBody:          `[{"accessDecision":"Denied","actionId":"Microsoft.ContainerService/aiManagers/pods/delete","isDataAction":true}]`,
+			aiManagerResourceId:    aiManagerResourceId,
+			expectedAllowed:        true,
+			expectedDenied:         false,
+			expectedAIMCheckAccess: false,
+		},
+		{
+			name:                   "no AI Manager resource id, no fallback",
+			clusterStatus:          http.StatusOK,
+			clusterBody:            `[{"accessDecision":"Denied","actionId":"Microsoft.ContainerService/managedClusters/pods/delete","isDataAction":true}]`,
+			aiManagerStatus:        http.StatusOK,
+			aiManagerBody:          `[{"accessDecision":"Allowed","actionId":"Microsoft.ContainerService/aiManagers/pods/delete","isDataAction":true}]`,
+			aiManagerResourceId:    "",
+			expectedAllowed:        false,
+			expectedDenied:         true,
+			expectedAIMCheckAccess: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var captured *capturedCheckAccess
+			ts, u := getAPIServerAndAccessInfoForAIManager(
+				managedClusters, clusterResourceId, tc.aiManagerResourceId,
+				tc.clusterStatus, tc.clusterBody,
+				tc.aiManagerStatus, tc.aiManagerBody,
+				&captured,
+			)
+			defer ts.Close()
+
+			request := &authzv1.SubjectAccessReviewSpec{
+				User: "test@bing.com",
+				ResourceAttributes: &authzv1.ResourceAttributes{
+					Namespace: "dev", Group: "", Resource: "pods",
+					Subresource: "status", Version: "v1", Name: "test", Verb: "delete",
+				},
+				Extra: map[string]authzv1.ExtraValue{"oid": {"00000000-0000-0000-0000-000000000000"}},
+			}
+
+			response, err := u.CheckAccess(context.Background(), request)
+			assert.NoError(t, err)
+			assert.NotNil(t, response)
+			assert.Equal(t, tc.expectedAllowed, response.Allowed)
+			assert.Equal(t, tc.expectedDenied, response.Denied)
+
+			assert.Equal(t, tc.expectedAIMCheckAccess, captured != nil, "AI Manager checkaccess expectation mismatch")
+			if tc.expectedAIMCheckAccess {
+				assert.Equal(t, tc.expectedAIMResourceID, captured.resourceID, "Unexpected AI Manager checkaccess resource ID")
+				actualActionIDs := make([]string, len(captured.actions))
+				for i, action := range captured.actions {
+					actualActionIDs[i] = action.AuthorizationEntity.Id
+				}
+				assert.Equal(t, tc.expectedAIMActions, actualActionIDs, "Unexpected AI Manager checkaccess actions")
+			}
+		})
+	}
+}
+
+// Test_AllowNonResPathDiscoveryAccess is the regression test for the discovery
+// half of MSRC 132991. The discovery exemption (which returns ALLOW with no Azure
+// RBAC check) must cover exactly the non-resource URLs of the upstream Kubernetes
+// "system:discovery" ClusterRole - "/api", "/api/*", "/apis", "/apis/*",
+// "/healthz", "/livez", "/openapi", "/openapi/*", "/readyz", "/version" and
+// "/version/" - where only the "*" entries match by prefix and the rest match
+// exactly. Subpaths of the exact-match entries, loose-prefix look-alikes and any
+// path containing a ".." traversal segment must not be exempted.
+func Test_AllowNonResPathDiscoveryAccess(t *testing.T) {
+	tests := []struct {
+		name           string
+		path           string
+		verb           string
+		allowDiscovery bool
+		nilNonResource bool
+		want           bool
+	}{
+		// Every entry of the upstream system:discovery rule - allowed. The "/api/*",
+		// "/apis/*" and "/openapi/*" entries are exercised through real subpaths.
+		{name: "api root", path: "/api", verb: "get", allowDiscovery: true, want: true},
+		{name: "core group version", path: "/api/v1", verb: "get", allowDiscovery: true, want: true},
+		{name: "apis root", path: "/apis", verb: "get", allowDiscovery: true, want: true},
+		{name: "named group version", path: "/apis/apps/v1", verb: "get", allowDiscovery: true, want: true},
+		{name: "healthz", path: "/healthz", verb: "get", allowDiscovery: true, want: true},
+		{name: "livez", path: "/livez", verb: "get", allowDiscovery: true, want: true},
+		{name: "openapi root", path: "/openapi", verb: "get", allowDiscovery: true, want: true},
+		{name: "openapi v2", path: "/openapi/v2", verb: "get", allowDiscovery: true, want: true},
+		{name: "openapi v3", path: "/openapi/v3", verb: "get", allowDiscovery: true, want: true},
+		{name: "readyz", path: "/readyz", verb: "get", allowDiscovery: true, want: true},
+		{name: "version", path: "/version", verb: "get", allowDiscovery: true, want: true},
+		{name: "version trailing slash", path: "/version/", verb: "get", allowDiscovery: true, want: true},
+		{name: "uppercase healthz", path: "/HEALTHZ", verb: "GET", allowDiscovery: true, want: true},
+
+		// Subpaths of the exact-match entries. Upstream grants only the bare
+		// endpoint, so these real apiserver subpaths are not discovery.
+		{name: "healthz etcd subpath", path: "/healthz/etcd", verb: "get", allowDiscovery: true, want: false},
+		{name: "healthz ping subpath", path: "/healthz/ping", verb: "get", allowDiscovery: true, want: false},
+		{name: "livez poststarthook subpath", path: "/livez/poststarthook/start-apiserver-admission-initializer", verb: "get", allowDiscovery: true, want: false},
+		{name: "readyz shutdown subpath", path: "/readyz/shutdown", verb: "get", allowDiscovery: true, want: false},
+		{name: "version subpath", path: "/version/foo", verb: "get", allowDiscovery: true, want: false},
+
+		// Loose-prefix look-alikes - must be rejected.
+		{name: "apiz lookalike", path: "/apiz", verb: "get", allowDiscovery: true, want: false},
+		{name: "healthzz lookalike", path: "/healthzz", verb: "get", allowDiscovery: true, want: false},
+		{name: "livezz lookalike", path: "/livezz", verb: "get", allowDiscovery: true, want: false},
+		{name: "openapiz lookalike", path: "/openapiz", verb: "get", allowDiscovery: true, want: false},
+		{name: "readyzz lookalike", path: "/readyzz", verb: "get", allowDiscovery: true, want: false},
+		{name: "versionx lookalike", path: "/versionx", verb: "get", allowDiscovery: true, want: false},
+		{name: "versionz lookalike", path: "/versionz", verb: "get", allowDiscovery: true, want: false},
+
+		// Path-traversal crafts - must be rejected.
+		{name: "apiz traversal to secrets", path: "/apiz/../-/-/secrets", verb: "get", allowDiscovery: true, want: false},
+		{name: "api traversal to secrets", path: "/api/../-/-/secrets", verb: "get", allowDiscovery: true, want: false},
+		{name: "healthz traversal", path: "/healthz/../-/-/secrets", verb: "get", allowDiscovery: true, want: false},
+
+		// Non-discovery resources and other guards.
+		{name: "unrelated path", path: "/logs", verb: "get", allowDiscovery: true, want: false},
+		{name: "metrics path", path: "/metrics", verb: "get", allowDiscovery: true, want: false},
+		{name: "empty path", path: "", verb: "get", allowDiscovery: true, want: false},
+		{name: "non-get verb", path: "/api", verb: "list", allowDiscovery: true, want: false},
+		{name: "discovery disabled", path: "/api", verb: "get", allowDiscovery: false, want: false},
+		{name: "nil non-resource attrs", nilNonResource: true, allowDiscovery: true, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			a := &AccessInfo{allowNonResDiscoveryPathAccess: tt.allowDiscovery}
+			req := &authzv1.SubjectAccessReviewSpec{User: "eve@contoso.com"}
+			if !tt.nilNonResource {
+				req.NonResourceAttributes = &authzv1.NonResourceAttributes{Path: tt.path, Verb: tt.verb}
+			}
+			if got := a.AllowNonResPathDiscoveryAccess(req); got != tt.want {
+				t.Errorf("AllowNonResPathDiscoveryAccess(path=%q, verb=%q) = %v, want %v", tt.path, tt.verb, got, tt.want)
+			}
+		})
+	}
+}

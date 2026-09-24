@@ -48,9 +48,16 @@ var (
 	expandedGroupsPerCall = 500
 	idtypClaim            = "idtyp"
 
+	// For getMemberGroups (user flow)
 	getMemberGroupsFailed = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "guard_azure_graph_failure_total",
 		Help: "Azure graph getMemberGroups call failed.",
+	})
+
+	// For getMemberGroups (service principal flow)
+	getMemberGroupsForSPFailed = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "guard_azure_graph_sp_failure_total",
+		Help: "Azure graph getMemberGroups call for service principal failed.",
 	})
 
 	getMemberGroupsUsingARCOboServiceCounter = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -100,15 +107,23 @@ type UserInfo struct {
 	lock          sync.RWMutex
 }
 
-func (u *UserInfo) getGroupIDs(ctx context.Context, userPrincipal string) ([]string, error) {
-	// Create a new request for finding the user.
+// getGroupIDs returns the group IDs the given principal is a member of. Users and
+// service principals are distinct Graph resources, so the principal type selects
+// the resource to query: users are looked up by user principal name, service
+// principals by object ID.
+func (u *UserInfo) getGroupIDs(ctx context.Context, principal string, isServicePrincipal bool) ([]string, error) {
+	// Create a new request for finding the principal.
 	// Shallow copy of the base API URL
-	userSearchURL := *u.apiURL
+	searchURL := *u.apiURL
+	resource := "users"
+	if isServicePrincipal {
+		resource = "servicePrincipals"
+	}
 	// Append the path for the member list
-	userSearchURL.Path = path.Join(userSearchURL.Path, fmt.Sprintf("/users/%s/getMemberGroups", userPrincipal))
+	searchURL.Path = path.Join(searchURL.Path, fmt.Sprintf("/%s/%s/getMemberGroups", resource, principal))
 
 	// The body being sent makes sure that all groups are returned, not just security groups
-	req, err := http.NewRequest(http.MethodPost, userSearchURL.String(), strings.NewReader(`{"securityEnabledOnly": false}`))
+	req, err := http.NewRequest(http.MethodPost, searchURL.String(), strings.NewReader(`{"securityEnabledOnly": false}`))
 	if err != nil {
 		return nil, errors.Wrap(err, "error creating group IDs request")
 	}
@@ -117,8 +132,12 @@ func (u *UserInfo) getGroupIDs(ctx context.Context, userPrincipal string) ([]str
 
 	resp, err := u.client.Do(req.WithContext(ctx))
 	if err != nil {
-		getMemberGroupsFailed.Inc()
-		return nil, errors.Wrap(err, "error listing users")
+		if isServicePrincipal {
+			getMemberGroupsForSPFailed.Inc()
+		} else {
+			getMemberGroupsFailed.Inc()
+		}
+		return nil, errors.Wrapf(err, "error listing group memberships for %s", resource)
 	}
 	defer func() {
 		_ = resp.Body.Close()
@@ -363,10 +382,12 @@ func (u *UserInfo) isTokenExpired() bool {
 	return u.expires.Before(time.Now())
 }
 
-// GetGroups gets a list of all groups that the given user principal is part of
-// Generally in federated directories the email address is the userPrincipalName
-func (u *UserInfo) GetGroups(ctx context.Context, userPrincipal string, token string) ([]string, error) {
+// GetGroups gets a list of all groups that the given principal is part of.
+// For users the principal is generally the email address in federated directories
+// (the userPrincipalName), for service principals it is the object ID.
+func (u *UserInfo) GetGroups(ctx context.Context, principal string, token string, isServicePrincipal bool) ([]string, error) {
 	// use arc obo service to get groups if authn mode is arc
+	// the arc obo service rejects service principal tokens with a clear error
 	if u.authMode == arcAuthMode {
 		groupIds, err := u.getMemberGroupsUsingARCOboService(ctx, token)
 		if err != nil {
@@ -375,8 +396,8 @@ func (u *UserInfo) GetGroups(ctx context.Context, userPrincipal string, token st
 		return groupIds, nil
 	}
 
-	// Get the group IDs for the user
-	groupIDs, err := u.getGroupIDs(ctx, userPrincipal)
+	// Get the group IDs for the principal
+	groupIDs, err := u.getGroupIDs(ctx, principal, isServicePrincipal)
 	if err != nil {
 		return nil, err
 	}
