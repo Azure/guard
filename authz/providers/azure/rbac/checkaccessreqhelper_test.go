@@ -39,6 +39,11 @@ const (
 	resourceId      = "resourceId"
 	aksClusterType  = "aks"
 	subresourceAttr = "Microsoft.ContainerService/managedClusters/resources:subresource"
+
+	// uppercaseGetVerb is the spelling of "get" that a real API server never
+	// produces: a resource verb comes from a closed lowercase set and a
+	// non-resource verb is strings.ToLower(req.Method). Guard must map neither.
+	uppercaseGetVerb = "GET"
 )
 
 func createOperationsMap(clusterType string) azureutils.OperationsMap {
@@ -930,6 +935,153 @@ func Test_getDataActions_wildcardWithEmptyOperationsMap(t *testing.T) {
 	}
 }
 
+// Test_getDataActions_rejectsUnmappableRequests is the regression test for
+// MSRC 132259. Guard must not build a DataAction out of a verb it does not map or
+// a path carrying a ".." segment: path.Join drops an empty final element and
+// path.Clean resolves "..", so either one lets distinct requests collapse onto the
+// same authorization question and the same cache entry. Neither can arise from a
+// request the API server routed, so both are rejected with a 400 rather than
+// normalized.
+func Test_getDataActions_rejectsUnmappableRequests(t *testing.T) {
+	setStoredOperationsMap(t, azureutils.NewOperationsMap())
+
+	tests := []struct {
+		name        string
+		spec        *authzv1.SubjectAccessReviewSpec
+		wantMessage string
+	}{
+		{
+			name: "uppercase resource verb",
+			spec: &authzv1.SubjectAccessReviewSpec{
+				ResourceAttributes: &authzv1.ResourceAttributes{Verb: uppercaseGetVerb, Resource: "secrets"},
+			},
+			wantMessage: "no DataAction is defined for verb",
+		},
+		{
+			name: "mixed case resource verb",
+			spec: &authzv1.SubjectAccessReviewSpec{
+				ResourceAttributes: &authzv1.ResourceAttributes{Verb: "Get", Resource: "secrets"},
+			},
+			wantMessage: "no DataAction is defined for verb",
+		},
+		{
+			name: "unknown resource verb",
+			spec: &authzv1.SubjectAccessReviewSpec{
+				ResourceAttributes: &authzv1.ResourceAttributes{Verb: "frobnicate", Resource: "secrets"},
+			},
+			wantMessage: "no DataAction is defined for verb",
+		},
+		{
+			name: "empty resource verb",
+			spec: &authzv1.SubjectAccessReviewSpec{
+				ResourceAttributes: &authzv1.ResourceAttributes{Verb: "", Resource: "secrets"},
+			},
+			wantMessage: "no DataAction is defined for verb",
+		},
+		{
+			name: "uppercase non-resource verb",
+			spec: &authzv1.SubjectAccessReviewSpec{
+				NonResourceAttributes: &authzv1.NonResourceAttributes{Path: "/healthz", Verb: uppercaseGetVerb},
+			},
+			wantMessage: "no DataAction is defined for non-resource verb",
+		},
+		{
+			name: "unmapped non-resource verb",
+			spec: &authzv1.SubjectAccessReviewSpec{
+				NonResourceAttributes: &authzv1.NonResourceAttributes{Path: "/healthz", Verb: "post"},
+			},
+			wantMessage: "no DataAction is defined for non-resource verb",
+		},
+		{
+			name: "empty non-resource verb",
+			spec: &authzv1.SubjectAccessReviewSpec{
+				NonResourceAttributes: &authzv1.NonResourceAttributes{Path: "/healthz", Verb: ""},
+			},
+			wantMessage: "no DataAction is defined for non-resource verb",
+		},
+		{
+			name: "non-resource path traversing to a resource",
+			spec: &authzv1.SubjectAccessReviewSpec{
+				NonResourceAttributes: &authzv1.NonResourceAttributes{Path: "/healthz/../-/-/secrets", Verb: "get"},
+			},
+			wantMessage: `contains a ".." segment`,
+		},
+		{
+			name: "non-resource path traversing above the cluster type",
+			spec: &authzv1.SubjectAccessReviewSpec{
+				NonResourceAttributes: &authzv1.NonResourceAttributes{Path: "/api/../..", Verb: "get"},
+			},
+			wantMessage: `contains a ".." segment`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := getDataActions(context.Background(), tt.spec, aksClusterType, false, false)
+
+			assert.Nil(t, got, "expected no actions for an unmappable request")
+			assert.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantMessage)
+
+			var codeErr errutils.HttpStatusCode
+			assert.True(t, errors.As(err, &codeErr), "error should implement HttpStatusCode")
+			assert.Equal(t, http.StatusBadRequest, codeErr.Code(), "error should carry 400 status code")
+		})
+	}
+}
+
+// Test_getDataActions_acceptsMappableRequests pins the requests adjacent to the
+// rejections above, so the MSRC 132259 validation cannot be widened into the verbs
+// and paths a real API server sends.
+func Test_getDataActions_acceptsMappableRequests(t *testing.T) {
+	setStoredOperationsMap(t, azureutils.NewOperationsMap())
+
+	tests := []struct {
+		name   string
+		spec   *authzv1.SubjectAccessReviewSpec
+		wantID string
+	}{
+		{
+			name: "lowercase resource verb",
+			spec: &authzv1.SubjectAccessReviewSpec{
+				ResourceAttributes: &authzv1.ResourceAttributes{Verb: "get", Resource: "secrets"},
+			},
+			wantID: aksClusterType + "/secrets/read",
+		},
+		{
+			name: "non-resource discovery read",
+			spec: &authzv1.SubjectAccessReviewSpec{
+				NonResourceAttributes: &authzv1.NonResourceAttributes{Path: "/healthz", Verb: "get"},
+			},
+			wantID: aksClusterType + "/healthz/read",
+		},
+		{
+			name: "non-resource delete",
+			spec: &authzv1.SubjectAccessReviewSpec{
+				NonResourceAttributes: &authzv1.NonResourceAttributes{Path: "/logs", Verb: "delete"},
+			},
+			wantID: aksClusterType + "/logs/delete",
+		},
+		{
+			name: "non-resource single dot segment is not traversal",
+			spec: &authzv1.SubjectAccessReviewSpec{
+				NonResourceAttributes: &authzv1.NonResourceAttributes{Path: "/healthz/./ping", Verb: "get"},
+			},
+			wantID: aksClusterType + "/healthz/ping/read",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := getDataActions(context.Background(), tt.spec, aksClusterType, false, false)
+
+			assert.NoError(t, err)
+			assert.Len(t, got, 1)
+			assert.Equal(t, tt.wantID, got[0].AuthorizationEntity.Id)
+		})
+	}
+}
+
 func createSet(authinfos []azureutils.AuthorizationActionInfo) map[azureutils.AuthorizationEntity]azureutils.AuthorizationActionInfo {
 	set := make(map[azureutils.AuthorizationEntity]azureutils.AuthorizationActionInfo)
 	for _, elem := range authinfos {
@@ -1020,7 +1172,9 @@ func Test_prepareCheckAccessRequestBody(t *testing.T) {
 
 func Test_prepareCheckAccessRequestBodyWithNamespace(t *testing.T) {
 	dummyUuid := uuid.New()
-	req := &authzv1.SubjectAccessReviewSpec{ResourceAttributes: &authzv1.ResourceAttributes{Namespace: "dev"}, Extra: map[string]authzv1.ExtraValue{"oid": {dummyUuid.String()}}}
+	// The verb and resource are only here to make the spec a well-formed one; this
+	// test asserts the namespace scope format, which does not depend on either.
+	req := &authzv1.SubjectAccessReviewSpec{ResourceAttributes: &authzv1.ResourceAttributes{Namespace: "dev", Resource: "pods", Verb: "get"}, Extra: map[string]authzv1.ExtraValue{"oid": {dummyUuid.String()}}}
 	clusterType := aksClusterType
 	createOperationsMap(clusterType)
 
