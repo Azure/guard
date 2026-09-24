@@ -1565,11 +1565,11 @@ func Test_getResultCacheKey_readVerbsShareCacheKey(t *testing.T) {
 	}
 }
 
-// Test_getResultCacheKey_noResourceNonResourceCollision is the regression test
-// for MSRC 132991. A non-resource path whose ".." segments normalize down to a
-// resource's path (e.g. "/apiz/../-/-/secrets") must NOT produce the same cache
-// key as the corresponding resource request (a cluster-wide list of secrets), so
-// a decision cached for one request is never served for a different one.
+// Test_getResultCacheKey_noResourceNonResourceCollision pins that a non-resource path
+// whose ".." segments normalize down to a resource's path (e.g. "/apiz/../-/-/secrets")
+// does not produce the same cache key as the corresponding resource request (a
+// cluster-wide list of secrets), so a decision cached for one request is never served
+// for a different one.
 func Test_getResultCacheKey_noResourceNonResourceCollision(t *testing.T) {
 	const user = "eve@contoso.com"
 
