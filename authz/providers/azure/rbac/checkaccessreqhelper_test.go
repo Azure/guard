@@ -1111,7 +1111,7 @@ func Test_prepareCheckAccessRequestBodyWithCustomResource(t *testing.T) {
 // scoped to those attributes is not evaluated while the map is empty. This is the
 // documented consequence of running without discovery, not the desired outcome -
 // see Test_prepareCheckAccessRequestBodyCustomResourceConditionIsEvaluable for the
-// behaviour that applies once the map is populated. MSRC 140081.
+// behaviour that applies once the map is populated.
 func Test_prepareCheckAccessRequestBodyWithCustomResourceOperationsMapEmpty(t *testing.T) {
 	req := &authzv1.SubjectAccessReviewSpec{
 		ResourceAttributes: &authzv1.ResourceAttributes{
@@ -1150,7 +1150,6 @@ func Test_prepareCheckAccessRequestBodyWithCustomResourceOperationsMapEmpty(t *t
 // only ever satisfied by a wildcard, and it carries no customResources attributes -
 // meaning a condition scoped to those attributes is not evaluated. The option
 // defaults to true precisely so that this is reached only by deliberate opt-out.
-// MSRC 140081.
 func Test_prepareCheckAccessRequestBodyWithCustomResourceTypeCheckDisabled(t *testing.T) {
 	req := &authzv1.SubjectAccessReviewSpec{
 		ResourceAttributes: &authzv1.ResourceAttributes{
@@ -1198,8 +1197,6 @@ func Test_prepareCheckAccessRequestBodyWithCustomResourceTypeCheckDisabled(t *te
 //     different group/kind if the attributes reported for that request are its own.
 //     Asserting only that the attribute keys are present cannot distinguish a
 //     correctly scoped request from one reporting some other group.
-//
-// MSRC 140081.
 func Test_prepareCheckAccessRequestBodyCustomResourceConditionIsEvaluable(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -1263,7 +1260,7 @@ func Test_prepareCheckAccessRequestBodyCustomResourceConditionIsEvaluable(t *tes
 // DataAction must not reclassify a built-in resource. A built-in present in the
 // operations map must keep its own per-apiGroup DataAction and must not acquire
 // customResources attributes, otherwise a condition scoped to custom resources would
-// start filtering built-in access. MSRC 140081.
+// start filtering built-in access.
 func Test_prepareCheckAccessRequestBodyBuiltInResourceIsUnaffected(t *testing.T) {
 	req := &authzv1.SubjectAccessReviewSpec{
 		ResourceAttributes: &authzv1.ResourceAttributes{

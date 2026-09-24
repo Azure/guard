@@ -30,7 +30,7 @@ import (
 // group/kind attributes that a condition scoped to those attributes evaluates. A
 // deployment that does not pass the flag therefore inherits whichever behaviour
 // this default selects, so the default is itself the control - and it has to be the
-// one that leaves such conditions evaluable. MSRC 140081.
+// one that leaves such conditions evaluable.
 func Test_NewOptionsAllowsCustomResourceTypeCheckByDefault(t *testing.T) {
 	if got := NewOptions().AllowCustomResourceTypeCheck; !got {
 		t.Errorf("NewOptions().AllowCustomResourceTypeCheck: want true, got %v", got)

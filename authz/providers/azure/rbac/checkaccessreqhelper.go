@@ -321,7 +321,7 @@ func getDataActions(ctx context.Context, subRevReq *authzv1.SubjectAccessReviewS
 			a wildcard, and it carries none of the customResources attributes set by
 			setAuthInfoResourceAttributes - which means a condition scoped to those
 			attributes is not evaluated for the request. Keep this enabled unless a
-			deployment deliberately opts out. MSRC 140081.
+			deployment deliberately opts out.
 		*/
 		isCustomerResourceTypeCheckAvailable := allowCustomResourceTypeCheck && len(storedOperationsMap) != 0
 		if !isCustomerResourceTypeCheckAvailable {
