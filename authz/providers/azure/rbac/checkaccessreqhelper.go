@@ -52,15 +52,13 @@ const (
 	NonAADUserNotAllowedVerdict = "Access denied by Azure RBAC for non AAD users. Configure --azure.skip-authz-for-non-aad-users to enable access. If you are an AAD user, please set Extra:oid parameter for impersonated user in the kubeconfig."
 	CheckAccessErrorVerdict     = "Access denied due to Azure RBAC check failure. Please retry later."
 	PodsResource                = "pods"
-	ServicesResource            = "services"
-	NodesResource               = "nodes"
-	ServiceAccountsResource     = "serviceaccounts"
 	CustomResources             = "customresources"
-	ProxySubresource            = "proxy"
-	AttachSubresource           = "attach"
-	PortForwardSubresource      = "portforward"
-	ExecSubresource             = "exec"
-	TokenSubresource            = "token"
+	StatusSubresource           = "status"
+	ScaleSubresource            = "scale"
+	LogSubresource              = "log"
+	LogsSubresource             = "logs"
+	actionSuffix                = "action"
+	wildcardValue               = "*"
 	ReadVerb                    = "read"
 	WriteVerb                   = "write"
 	DeleteVerb                  = "delete"
@@ -259,52 +257,76 @@ func getActionName(verb string) string {
 	}
 }
 
-// securitySensitiveSubresources lists resource/subresource pairs that upstream
-// Kubernetes treats as distinct authorization targets. For these, the
-// subresource is preserved in the DataAction string
-// ("<resource>/<subresource>/action") rather than collapsed into the base
-// resource action, so the authorization decision keeps the same granularity as
-// the upstream Kubernetes RBAC model (see the bootstrappolicy view/edit
-// ClusterRoles).
+// safeSubresources are the subresources that upstream's read-only "view"
+// ClusterRole grants alongside their parent (pods/log, /status, /scale); these
+// collapse into the base resource action. Every other subresource - including
+// ones added later by Kubernetes, CRDs or aggregated API servers - gets its own
+// "<resource>/<subresource>/action", so it is never silently covered by the
+// parent's permission. This is why pods exec/attach/portforward/proxy,
+// services/proxy, nodes/proxy and serviceaccounts/token stay distinct.
+var safeSubresources = map[string]struct{}{
+	StatusSubresource: {},
+	ScaleSubresource:  {},
+	// "log" is the upstream name; guard has historically also seen "logs".
+	LogSubresource:  {},
+	LogsSubresource: {},
+}
+
+// unregisteredSubresources would otherwise get their own action, but
+// Microsoft.ContainerService does not publish that DataAction yet. Guard does
+// not own the action namespace: an unpublished string cannot be granted in a
+// custom role and is matched by no leaf-enumerated built-in role, so emitting
+// it denies requests that work today and leaves no customer-side fix. They keep
+// collapsing into the parent action until the provider manifest ships.
 //
-// The pods exec/attach/portforward/proxy, services/proxy and nodes/proxy
-// subresources are granted separately from base read/write in the upstream
-// roles, so they are mapped to their own DataAction rather than to
-// <resource>/read or <resource>/write.
+// Verified unpublished on 2026-09-25 with
+// "az provider operation show --namespace Microsoft.ContainerService"; drop an
+// entry once that command lists its "<resource>/<subresource>/action".
 //
-// serviceaccounts/token is the TokenRequest API. Upstream lists it as its own
-// resource in the aggregate-to-edit ClusterRole
-// ("create" on "serviceaccounts/token", separate from the write rule on
-// "serviceaccounts"), because issuing a bearer token for a ServiceAccount is a
-// credential-minting operation rather than an update of the ServiceAccount
-// object. Collapsing it into serviceaccounts/write would grant token issuance
-// to every principal that can create or update ServiceAccount objects, which
-// upstream Kubernetes RBAC does not do.
-var securitySensitiveSubresources = map[string]map[string]struct{}{
-	PodsResource: {
-		ExecSubresource:        {},
-		AttachSubresource:      {},
-		PortForwardSubresource: {},
-		ProxySubresource:       {},
-	},
-	ServicesResource: {
-		ProxySubresource: {},
-	},
-	NodesResource: {
-		ProxySubresource: {},
-	},
-	ServiceAccountsResource: {
-		TokenSubresource: {},
-	},
+// pods attach/portforward/proxy, services/proxy, nodes/proxy and
+// serviceaccounts/token are deliberately absent. Their actions are unpublished
+// too, but guard already emits them: each was a reviewed security decision that
+// accepted the gap and left provider registration as follow-up. Reverting those
+// is not in scope here.
+var unregisteredSubresources = map[string]struct{}{
+	"approval":            {}, // kubectl certificate approve/deny
+	"approvals":           {}, // plural spelling guard has historically seen
+	"binding":             {}, // scheduler pod placement
+	"ephemeralcontainers": {}, // kubectl debug
+	"eviction":            {}, // kubectl drain, PDB-aware eviction
+	"finalize":            {}, // namespace teardown
+	"resize":              {}, // in-place pod resource resize
+}
+
+// collapsesIntoParent reports whether subResource is authorized by the parent
+// resource's action rather than by one of its own.
+func collapsesIntoParent(subResource string) bool {
+	if _, safe := safeSubresources[subResource]; safe {
+		return true
+	}
+	_, unregistered := unregisteredSubresources[subResource]
+	return unregistered
 }
 
 func getResourceAndAction(resource string, subResource string, verb string) string {
-	if subs, ok := securitySensitiveSubresources[resource]; ok && subResource != "" {
-		if _, sensitive := subs[subResource]; sensitive {
-			return path.Join(resource, subResource, "action")
-		}
+	action := getActionName(verb)
+
+	// Wildcards are expanded from the operations map elsewhere.
+	if subResource == "" || subResource == wildcardValue || resource == wildcardValue || action == wildcardValue {
+		return path.Join(resource, action)
 	}
-	return path.Join(resource, getActionName(verb))
+
+	// Special verbs already name the privileged operation, so the verb rather
+	// than the subresource identifies what is authorized.
+	if strings.HasSuffix(action, actionSuffix) {
+		return path.Join(resource, action)
+	}
+
+	if collapsesIntoParent(subResource) {
+		return path.Join(resource, action)
+	}
+
+	return path.Join(resource, subResource, actionSuffix)
 }
 
 func getDataActions(ctx context.Context, subRevReq *authzv1.SubjectAccessReviewSpec, clusterType string, allowCustomResourceTypeCheck bool, allowSubresourceTypeCheck bool) ([]azureutils.AuthorizationActionInfo, error) {

@@ -374,6 +374,8 @@ func Test_getDataActions(t *testing.T) {
 			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "arc/batch/cronjobs/write"}, IsDataAction: true}},
 		},
 
+		// approvals has no published DataAction, so it keeps collapsing into the
+		// parent delete rather than composing an ungrantable action.
 		{
 			"aks6",
 			args{
@@ -542,9 +544,8 @@ func Test_getDataActions(t *testing.T) {
 			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/serviceaccounts/write"}, IsDataAction: true}},
 		},
 
-		// The impersonate verb already encodes the privileged operation in the
-		// action name and has no subresource, so it keeps resolving through the
-		// verb mapping rather than the subresource table.
+		// The impersonate verb names the operation itself and has no subresource,
+		// so it resolves through the verb mapping, not the safe-subresource check.
 		{
 			"serviceAccountsImpersonateUnchanged",
 			args{
@@ -556,8 +557,7 @@ func Test_getDataActions(t *testing.T) {
 			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/serviceaccounts/impersonate/action"}, IsDataAction: true}},
 		},
 
-		// A non-sensitive pods subresource (e.g. status) must still collapse to
-		// the base read action so this fix does not over-restrict legitimate reads.
+		// status is safe: it collapses to the parent read action.
 		{
 			"podsStatusSubresourceStillCollapsed",
 			args{
@@ -569,10 +569,11 @@ func Test_getDataActions(t *testing.T) {
 			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/pods/read"}, IsDataAction: true}},
 		},
 
-		// CSR with a non-sensitive subresource (e.g. approval, status)
-		// should still collapse to the base action, not preserve the subresource.
+		// Subresources with no published DataAction keep collapsing into the
+		// parent action: composing one would deny requests that work today and
+		// leave no way to grant them back.
 		{
-			"csrApprovalSubresourceStillCollapsed",
+			"csrApprovalHasNoPublishedAction",
 			args{
 				isWildcardTest: false,
 				subRevReq: &authzv1.SubjectAccessReviewSpec{
@@ -580,6 +581,110 @@ func Test_getDataActions(t *testing.T) {
 				}, clusterType: aksClusterType,
 			},
 			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/certificates.k8s.io/certificatesigningrequests/write"}, IsDataAction: true}},
+		},
+
+		{
+			"podsEphemeralContainersHasNoPublishedAction",
+			args{
+				isWildcardTest: false,
+				subRevReq: &authzv1.SubjectAccessReviewSpec{
+					ResourceAttributes: &authzv1.ResourceAttributes{Group: "", Resource: "pods", Subresource: "ephemeralcontainers", Version: "v1", Name: "test", Verb: "update"},
+				}, clusterType: aksClusterType,
+			},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/pods/write"}, IsDataAction: true}},
+		},
+
+		{
+			"podsEvictionHasNoPublishedAction",
+			args{
+				isWildcardTest: false,
+				subRevReq: &authzv1.SubjectAccessReviewSpec{
+					ResourceAttributes: &authzv1.ResourceAttributes{Group: "", Resource: "pods", Subresource: "eviction", Version: "v1", Name: "test", Verb: "create"},
+				}, clusterType: aksClusterType,
+			},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/pods/write"}, IsDataAction: true}},
+		},
+
+		{
+			"podsBindingHasNoPublishedAction",
+			args{
+				isWildcardTest: false,
+				subRevReq: &authzv1.SubjectAccessReviewSpec{
+					ResourceAttributes: &authzv1.ResourceAttributes{Group: "", Resource: "pods", Subresource: "binding", Version: "v1", Name: "test", Verb: "create"},
+				}, clusterType: aksClusterType,
+			},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/pods/write"}, IsDataAction: true}},
+		},
+
+		{
+			"podsResizeHasNoPublishedAction",
+			args{
+				isWildcardTest: false,
+				subRevReq: &authzv1.SubjectAccessReviewSpec{
+					ResourceAttributes: &authzv1.ResourceAttributes{Group: "", Resource: "pods", Subresource: "resize", Version: "v1", Name: "test", Verb: "patch"},
+				}, clusterType: aksClusterType,
+			},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/pods/write"}, IsDataAction: true}},
+		},
+
+		{
+			"namespacesFinalizeHasNoPublishedAction",
+			args{
+				isWildcardTest: false,
+				subRevReq: &authzv1.SubjectAccessReviewSpec{
+					ResourceAttributes: &authzv1.ResourceAttributes{Group: "", Resource: "namespaces", Subresource: "finalize", Version: "v1", Name: "test", Verb: "update"},
+				}, clusterType: aksClusterType,
+			},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/namespaces/write"}, IsDataAction: true}},
+		},
+
+		// pods/exec is the counter-case: its action IS published, so it stays
+		// distinct rather than collapsing into pods/write.
+		{
+			"podsExecHasPublishedAction",
+			args{
+				isWildcardTest: false,
+				subRevReq: &authzv1.SubjectAccessReviewSpec{
+					ResourceAttributes: &authzv1.ResourceAttributes{Group: "", Resource: "pods", Subresource: "exec", Version: "v1", Name: "test", Verb: "create"},
+				}, clusterType: aksClusterType,
+			},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/pods/exec/action"}, IsDataAction: true}},
+		},
+
+		// Safe subresources collapse: upstream's view role grants them with the parent.
+		{
+			"podsLogSubresourceCollapses",
+			args{
+				isWildcardTest: false,
+				subRevReq: &authzv1.SubjectAccessReviewSpec{
+					ResourceAttributes: &authzv1.ResourceAttributes{Group: "", Resource: "pods", Subresource: "log", Version: "v1", Name: "test", Verb: "get"},
+				}, clusterType: aksClusterType,
+			},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/pods/read"}, IsDataAction: true}},
+		},
+
+		{
+			"deploymentsScaleSubresourceCollapses",
+			args{
+				isWildcardTest: false,
+				subRevReq: &authzv1.SubjectAccessReviewSpec{
+					ResourceAttributes: &authzv1.ResourceAttributes{Group: "apps", Resource: "deployments", Subresource: "scale", Version: "v1", Name: "test", Verb: "update"},
+				}, clusterType: aksClusterType,
+			},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/apps/deployments/write"}, IsDataAction: true}},
+		},
+
+		// An unclassified subresource - future Kubernetes, a CRD, an aggregated
+		// API - must not inherit the parent's permission. This is the inversion.
+		{
+			"unknownSubresourceIsNotCollapsed",
+			args{
+				isWildcardTest: false,
+				subRevReq: &authzv1.SubjectAccessReviewSpec{
+					ResourceAttributes: &authzv1.ResourceAttributes{Group: "", Resource: "pods", Subresource: "somefuturesubresource", Version: "v1", Name: "test", Verb: "get"},
+				}, clusterType: aksClusterType,
+			},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/pods/somefuturesubresource/action"}, IsDataAction: true}},
 		},
 
 		{
@@ -1451,6 +1556,26 @@ func cacheKeyDistinctCases() []cacheKeyCase {
 		resourceCase("user without the separator, long namespace", "a", "b/c", cacheKeyTestGroup),
 		subresourceCase("subresource check disabled", false),
 		subresourceCase("subresource check enabled", true),
+		// An unsafe subresource resolves to its own action, so it must not share
+		// the parent's cache entry even though the subresource is not on the key.
+		{
+			name: "parent resource without a subresource",
+			subRevReq: &authzv1.SubjectAccessReviewSpec{
+				User: cacheKeyTestUser,
+				ResourceAttributes: &authzv1.ResourceAttributes{
+					Namespace: "sub", Resource: "serviceaccounts", Verb: "create",
+				},
+			},
+		},
+		{
+			name: "unsafe subresource of that parent resource",
+			subRevReq: &authzv1.SubjectAccessReviewSpec{
+				User: cacheKeyTestUser,
+				ResourceAttributes: &authzv1.ResourceAttributes{
+					Namespace: "sub", Resource: "serviceaccounts", Subresource: "token", Verb: "create",
+				},
+			},
+		},
 		{
 			name: "resource request",
 			subRevReq: &authzv1.SubjectAccessReviewSpec{
