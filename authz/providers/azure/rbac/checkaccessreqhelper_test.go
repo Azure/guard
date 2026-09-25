@@ -374,7 +374,8 @@ func Test_getDataActions(t *testing.T) {
 			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "arc/batch/cronjobs/write"}, IsDataAction: true}},
 		},
 
-		// approvals is not safe, so it no longer collapses into the parent delete.
+		// approvals has no published DataAction, so it keeps collapsing into the
+		// parent delete rather than composing an ungrantable action.
 		{
 			"aks6",
 			args{
@@ -383,7 +384,7 @@ func Test_getDataActions(t *testing.T) {
 					ResourceAttributes: &authzv1.ResourceAttributes{Group: "certificates.k8s.io", Resource: "certificatesigningrequests", Subresource: "approvals", Version: "v1", Name: "test", Verb: "deletecollection"},
 				}, clusterType: aksClusterType,
 			},
-			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/certificates.k8s.io/certificatesigningrequests/approvals/action"}, IsDataAction: true}},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/certificates.k8s.io/certificatesigningrequests/delete"}, IsDataAction: true}},
 		},
 
 		{
@@ -394,7 +395,7 @@ func Test_getDataActions(t *testing.T) {
 					ResourceAttributes: &authzv1.ResourceAttributes{Group: "certificates.k8s.io", Resource: "certificatesigningrequests", Subresource: "approvals", Version: "v1", Name: "test", Verb: "deletecollection"},
 				}, clusterType: "fleet",
 			},
-			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "fleet/certificates.k8s.io/certificatesigningrequests/approvals/action"}, IsDataAction: true}},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "fleet/certificates.k8s.io/certificatesigningrequests/delete"}, IsDataAction: true}},
 		},
 
 		{
@@ -568,16 +569,86 @@ func Test_getDataActions(t *testing.T) {
 			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/pods/read"}, IsDataAction: true}},
 		},
 
-		// approval is not safe, so it gets its own action, not the parent write.
+		// Subresources with no published DataAction keep collapsing into the
+		// parent action: composing one would deny requests that work today and
+		// leave no way to grant them back.
 		{
-			"csrApprovalSubresourceGetsOwnAction",
+			"csrApprovalHasNoPublishedAction",
 			args{
 				isWildcardTest: false,
 				subRevReq: &authzv1.SubjectAccessReviewSpec{
 					ResourceAttributes: &authzv1.ResourceAttributes{Group: "certificates.k8s.io", Resource: "certificatesigningrequests", Subresource: "approval", Version: "v1", Name: "test", Verb: "update"},
 				}, clusterType: aksClusterType,
 			},
-			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/certificates.k8s.io/certificatesigningrequests/approval/action"}, IsDataAction: true}},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/certificates.k8s.io/certificatesigningrequests/write"}, IsDataAction: true}},
+		},
+
+		{
+			"podsEphemeralContainersHasNoPublishedAction",
+			args{
+				isWildcardTest: false,
+				subRevReq: &authzv1.SubjectAccessReviewSpec{
+					ResourceAttributes: &authzv1.ResourceAttributes{Group: "", Resource: "pods", Subresource: "ephemeralcontainers", Version: "v1", Name: "test", Verb: "update"},
+				}, clusterType: aksClusterType,
+			},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/pods/write"}, IsDataAction: true}},
+		},
+
+		{
+			"podsEvictionHasNoPublishedAction",
+			args{
+				isWildcardTest: false,
+				subRevReq: &authzv1.SubjectAccessReviewSpec{
+					ResourceAttributes: &authzv1.ResourceAttributes{Group: "", Resource: "pods", Subresource: "eviction", Version: "v1", Name: "test", Verb: "create"},
+				}, clusterType: aksClusterType,
+			},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/pods/write"}, IsDataAction: true}},
+		},
+
+		{
+			"podsBindingHasNoPublishedAction",
+			args{
+				isWildcardTest: false,
+				subRevReq: &authzv1.SubjectAccessReviewSpec{
+					ResourceAttributes: &authzv1.ResourceAttributes{Group: "", Resource: "pods", Subresource: "binding", Version: "v1", Name: "test", Verb: "create"},
+				}, clusterType: aksClusterType,
+			},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/pods/write"}, IsDataAction: true}},
+		},
+
+		{
+			"podsResizeHasNoPublishedAction",
+			args{
+				isWildcardTest: false,
+				subRevReq: &authzv1.SubjectAccessReviewSpec{
+					ResourceAttributes: &authzv1.ResourceAttributes{Group: "", Resource: "pods", Subresource: "resize", Version: "v1", Name: "test", Verb: "patch"},
+				}, clusterType: aksClusterType,
+			},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/pods/write"}, IsDataAction: true}},
+		},
+
+		{
+			"namespacesFinalizeHasNoPublishedAction",
+			args{
+				isWildcardTest: false,
+				subRevReq: &authzv1.SubjectAccessReviewSpec{
+					ResourceAttributes: &authzv1.ResourceAttributes{Group: "", Resource: "namespaces", Subresource: "finalize", Version: "v1", Name: "test", Verb: "update"},
+				}, clusterType: aksClusterType,
+			},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/namespaces/write"}, IsDataAction: true}},
+		},
+
+		// pods/exec is the counter-case: its action IS published, so it stays
+		// distinct rather than collapsing into pods/write.
+		{
+			"podsExecHasPublishedAction",
+			args{
+				isWildcardTest: false,
+				subRevReq: &authzv1.SubjectAccessReviewSpec{
+					ResourceAttributes: &authzv1.ResourceAttributes{Group: "", Resource: "pods", Subresource: "exec", Version: "v1", Name: "test", Verb: "create"},
+				}, clusterType: aksClusterType,
+			},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/pods/exec/action"}, IsDataAction: true}},
 		},
 
 		// Safe subresources collapse: upstream's view role grants them with the parent.

@@ -272,6 +272,42 @@ var safeSubresources = map[string]struct{}{
 	LogsSubresource: {},
 }
 
+// unregisteredSubresources would otherwise get their own action, but
+// Microsoft.ContainerService does not publish that DataAction yet. Guard does
+// not own the action namespace: an unpublished string cannot be granted in a
+// custom role and is matched by no leaf-enumerated built-in role, so emitting
+// it denies requests that work today and leaves no customer-side fix. They keep
+// collapsing into the parent action until the provider manifest ships.
+//
+// Verified unpublished on 2026-09-25 with
+// "az provider operation show --namespace Microsoft.ContainerService"; drop an
+// entry once that command lists its "<resource>/<subresource>/action".
+//
+// pods attach/portforward/proxy, services/proxy, nodes/proxy and
+// serviceaccounts/token are deliberately absent. Their actions are unpublished
+// too, but guard already emits them: each was a reviewed security decision that
+// accepted the gap and left provider registration as follow-up. Reverting those
+// is not in scope here.
+var unregisteredSubresources = map[string]struct{}{
+	"approval":            {}, // kubectl certificate approve/deny
+	"approvals":           {}, // plural spelling guard has historically seen
+	"binding":             {}, // scheduler pod placement
+	"ephemeralcontainers": {}, // kubectl debug
+	"eviction":            {}, // kubectl drain, PDB-aware eviction
+	"finalize":            {}, // namespace teardown
+	"resize":              {}, // in-place pod resource resize
+}
+
+// collapsesIntoParent reports whether subResource is authorized by the parent
+// resource's action rather than by one of its own.
+func collapsesIntoParent(subResource string) bool {
+	if _, safe := safeSubresources[subResource]; safe {
+		return true
+	}
+	_, unregistered := unregisteredSubresources[subResource]
+	return unregistered
+}
+
 func getResourceAndAction(resource string, subResource string, verb string) string {
 	action := getActionName(verb)
 
@@ -286,7 +322,7 @@ func getResourceAndAction(resource string, subResource string, verb string) stri
 		return path.Join(resource, action)
 	}
 
-	if _, safe := safeSubresources[subResource]; safe {
+	if collapsesIntoParent(subResource) {
 		return path.Join(resource, action)
 	}
 
