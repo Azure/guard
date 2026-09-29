@@ -355,15 +355,12 @@ func (a *AccessInfo) SetResultInCache(ctx context.Context, request *authzv1.Subj
 	return store.Set(key, result)
 }
 
-// discoveryExactPaths and discoveryPrefixPaths together reproduce the non-resource
-// URLs of the upstream Kubernetes "system:discovery" ClusterRole
-// (plugin/pkg/auth/authorizer/rbac/bootstrappolicy/policy.go), which upstream binds
-// to the system:authenticated group. Upstream evaluates a rule URL ending in "*" as
-// a prefix match with the "*" trimmed and every other rule URL as an exact string
-// match (rbacv1.NonResourceURLMatches), so "/api/*" contributes the "/api/" prefix
-// while "/healthz" and "/version" match only themselves. Guard must not exempt
-// anything outside this set, so paths such as "/healthz/etcd" or "/apiz" get a
-// regular Azure RBAC check instead (MSRC 132991).
+// discoveryExactPaths and discoveryPrefixPaths reproduce the non-resource URLs of the
+// upstream "system:discovery" ClusterRole (bootstrappolicy/policy.go). Upstream matches
+// a rule URL ending in "*" as a prefix with the "*" trimmed and every other entry as an
+// exact string (rbacv1.NonResourceURLMatches), so "/api/*" contributes the "/api/"
+// prefix while "/healthz" matches only itself. Paths outside the set, such as
+// "/healthz/etcd" or "/apiz", get a regular Azure RBAC check.
 var discoveryExactPaths = map[string]struct{}{
 	"/api":      {},
 	"/apis":     {},
@@ -379,14 +376,12 @@ var discoveryExactPaths = map[string]struct{}{
 // with the trailing "*" trimmed, matched as prefixes exactly as upstream does.
 var discoveryPrefixPaths = []string{"/api/", "/apis/", "/openapi/"}
 
-// isNonResourceDiscoveryPath reports whether the lowercased non-resource path is one
-// of the discovery endpoints granted by the upstream "system:discovery" ClusterRole.
-// Guard is deliberately stricter than upstream on one point: a path containing a ".."
-// traversal segment is never treated as discovery. nonResourceAttributes.path on a
-// SelfSubjectAccessReview is fully caller-controlled and is never routed by the API
-// server, so without this check a path such as "/api/../.." would match the "/api/"
-// prefix rule and be exempted from the Azure RBAC check. Reporting false is not a
-// denial; the request falls through to the regular Azure RBAC check (MSRC 132991).
+// isNonResourceDiscoveryPath reports whether lowerPath is one of the discovery
+// endpoints granted by the upstream "system:discovery" ClusterRole. A path containing
+// a ".." segment is never treated as discovery: nonResourceAttributes.path is
+// caller-controlled and is never routed by the API server, so "/api/../.." would
+// otherwise match the "/api/" prefix rule. Reporting false is not a denial - the
+// request falls through to the regular Azure RBAC check.
 func isNonResourceDiscoveryPath(lowerPath string) bool {
 	if lowerPath == "" {
 		return false

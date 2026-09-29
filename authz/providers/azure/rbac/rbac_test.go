@@ -1169,14 +1169,13 @@ func TestCheckAccess_AIManagerFallback(t *testing.T) {
 	}
 }
 
-// Test_AllowNonResPathDiscoveryAccess is the regression test for the discovery
-// half of MSRC 132991. The discovery exemption (which returns ALLOW with no Azure
-// RBAC check) must cover exactly the non-resource URLs of the upstream Kubernetes
-// "system:discovery" ClusterRole - "/api", "/api/*", "/apis", "/apis/*",
-// "/healthz", "/livez", "/openapi", "/openapi/*", "/readyz", "/version" and
-// "/version/" - where only the "*" entries match by prefix and the rest match
-// exactly. Subpaths of the exact-match entries, loose-prefix look-alikes and any
-// path containing a ".." traversal segment must not be exempted.
+// Test_AllowNonResPathDiscoveryAccess pins the discovery exemption (which returns
+// ALLOW with no Azure RBAC check) to exactly the non-resource URLs of the upstream
+// "system:discovery" ClusterRole - "/api", "/api/*", "/apis", "/apis/*", "/healthz",
+// "/livez", "/openapi", "/openapi/*", "/readyz", "/version" and "/version/" - where
+// only the "*" entries match by prefix and the rest match exactly. Subpaths of the
+// exact-match entries, loose-prefix look-alikes and any path containing a ".."
+// traversal segment must not be exempted.
 func Test_AllowNonResPathDiscoveryAccess(t *testing.T) {
 	tests := []struct {
 		name           string
