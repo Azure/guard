@@ -18,6 +18,9 @@ package rbac
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -49,17 +52,15 @@ const (
 	NonAADUserNotAllowedVerdict = "Access denied by Azure RBAC for non AAD users. Configure --azure.skip-authz-for-non-aad-users to enable access. If you are an AAD user, please set Extra:oid parameter for impersonated user in the kubeconfig."
 	CheckAccessErrorVerdict     = "Access denied due to Azure RBAC check failure. Please retry later."
 	PodsResource                = "pods"
-	ServicesResource            = "services"
-	NodesResource               = "nodes"
-	ServiceAccountsResource     = "serviceaccounts"
 	CSRResource                 = "certificatesigningrequests"
 	CustomResources             = "customresources"
-	ProxySubresource            = "proxy"
-	AttachSubresource           = "attach"
-	PortForwardSubresource      = "portforward"
-	ExecSubresource             = "exec"
-	TokenSubresource            = "token"
+	StatusSubresource           = "status"
+	ScaleSubresource            = "scale"
+	LogSubresource              = "log"
+	LogsSubresource             = "logs"
 	NodeClientSubresource       = "nodeclient"
+	actionSuffix                = "action"
+	wildcardValue               = "*"
 	ReadVerb                    = "read"
 	WriteVerb                   = "write"
 	DeleteVerb                  = "delete"
@@ -258,72 +259,80 @@ func getActionName(verb string) string {
 	}
 }
 
-// securitySensitiveSubresources lists resource/subresource pairs that upstream
-// Kubernetes treats as distinct authorization targets. For these, the
-// subresource is preserved in the DataAction string
-// ("<resource>/<subresource>/action") rather than collapsed into the base
-// resource action, so the authorization decision keeps the same granularity as
-// the upstream Kubernetes RBAC model (see the bootstrappolicy view/edit
-// ClusterRoles).
+// safeSubresources are the subresources that upstream's read-only "view"
+// ClusterRole grants alongside their parent (pods/log, /status, /scale); these
+// collapse into the base resource action. Every other subresource - including
+// ones added later by Kubernetes, CRDs or aggregated API servers - gets its own
+// "<resource>/<subresource>/action", so it is never silently covered by the
+// parent's permission. This is why pods exec/attach/portforward/proxy,
+// services/proxy, nodes/proxy and serviceaccounts/token stay distinct.
+var safeSubresources = map[string]struct{}{
+	StatusSubresource: {},
+	ScaleSubresource:  {},
+	// "log" is the upstream name; guard has historically also seen "logs".
+	LogSubresource:  {},
+	LogsSubresource: {},
+}
+
+// unregisteredSubresources would otherwise get their own action, but
+// Microsoft.ContainerService does not publish that DataAction yet. Guard does
+// not own the action namespace: an unpublished string cannot be granted in a
+// custom role and is matched by no leaf-enumerated built-in role, so emitting
+// it denies requests that work today and leaves no customer-side fix. They keep
+// collapsing into the parent action until the provider manifest ships.
 //
-// The pods exec/attach/portforward/proxy, services/proxy and nodes/proxy
-// subresources are granted separately from base read/write in the upstream
-// roles, so they are mapped to their own DataAction rather than to
-// <resource>/read or <resource>/write.
+// Verified unpublished on 2026-09-25 with
+// "az provider operation show --namespace Microsoft.ContainerService"; drop an
+// entry once that command lists its "<resource>/<subresource>/action".
 //
-// serviceaccounts/token is the TokenRequest API. Upstream lists it as its own
-// resource in the aggregate-to-edit ClusterRole
-// ("create" on "serviceaccounts/token", separate from the write rule on
-// "serviceaccounts"), because issuing a bearer token for a ServiceAccount is a
-// credential-minting operation rather than an update of the ServiceAccount
-// object. Collapsing it into serviceaccounts/write would grant token issuance
-// to every principal that can create or update ServiceAccount objects, which
-// upstream Kubernetes RBAC does not do.
-//
-// certificatesigningrequests/nodeclient is the authorization gate used by the
-// upstream CSR approver before issuing a kubelet client certificate. Collapsing
-// it into certificatesigningrequests/write would let general CSR writers pass
-// this credential-issuance check.
-var securitySensitiveSubresources = map[string]map[string]struct{}{
-	PodsResource: {
-		ExecSubresource:        {},
-		AttachSubresource:      {},
-		PortForwardSubresource: {},
-		ProxySubresource:       {},
-	},
-	ServicesResource: {
-		ProxySubresource: {},
-	},
-	NodesResource: {
-		ProxySubresource: {},
-	},
-	ServiceAccountsResource: {
-		TokenSubresource: {},
-	},
-	CSRResource: {
-		NodeClientSubresource: {},
-	},
+// pods attach/portforward/proxy, services/proxy, nodes/proxy and
+// serviceaccounts/token are deliberately absent. Their actions are unpublished
+// too, but guard already emits them: each was a reviewed security decision that
+// accepted the gap and left provider registration as follow-up. Reverting those
+// is not in scope here.
+var unregisteredSubresources = map[string]struct{}{
+	"approval":            {}, // kubectl certificate approve/deny
+	"approvals":           {}, // plural spelling guard has historically seen
+	"binding":             {}, // scheduler pod placement
+	"ephemeralcontainers": {}, // kubectl debug
+	"eviction":            {}, // kubectl drain, PDB-aware eviction
+	"finalize":            {}, // namespace teardown
+	"resize":              {}, // in-place pod resource resize
+}
+
+// collapsesIntoParent reports whether subResource is authorized by the parent
+// resource's action rather than by one of its own.
+func collapsesIntoParent(subResource string) bool {
+	if _, safe := safeSubresources[subResource]; safe {
+		return true
+	}
+	_, unregistered := unregisteredSubresources[subResource]
+	return unregistered
 }
 
 func getResourceAndAction(resource string, subResource string, verb string, enforceCSRNodeClientDataAction bool) string {
-	if shouldPreserveSubresource(resource, subResource, enforceCSRNodeClientDataAction) {
-		return path.Join(resource, subResource, "action")
-	}
-	return path.Join(resource, getActionName(verb))
-}
+	action := getActionName(verb)
 
-func shouldPreserveSubresource(resource string, subResource string, enforceCSRNodeClientDataAction bool) bool {
-	if resource == CSRResource && subResource == NodeClientSubresource {
-		return enforceCSRNodeClientDataAction
+	// Wildcards are expanded from the operations map elsewhere.
+	if subResource == "" || subResource == wildcardValue || resource == wildcardValue || action == wildcardValue {
+		return path.Join(resource, action)
 	}
 
-	subResources, ok := securitySensitiveSubresources[resource]
-	if !ok {
-		return false
+	if resource == CSRResource && subResource == NodeClientSubresource && !enforceCSRNodeClientDataAction {
+		return path.Join(resource, action)
 	}
 
-	_, ok = subResources[subResource]
-	return ok
+	// Special verbs already name the privileged operation, so the verb rather
+	// than the subresource identifies what is authorized.
+	if strings.HasSuffix(action, actionSuffix) {
+		return path.Join(resource, action)
+	}
+
+	if collapsesIntoParent(subResource) {
+		return path.Join(resource, action)
+	}
+
+	return path.Join(resource, subResource, actionSuffix)
 }
 
 func getDataActions(ctx context.Context, subRevReq *authzv1.SubjectAccessReviewSpec, clusterType string, allowCustomResourceTypeCheck bool, allowSubresourceTypeCheck bool, enforceCSRNodeClientDataAction bool) ([]azureutils.AuthorizationActionInfo, error) {
@@ -663,33 +672,103 @@ func createAuthorizationActionInfoList(filteredOperations azureutils.OperationsM
 	return authInfos, nil
 }
 
-func defaultDir(s string) string {
-	if s != "" {
-		return s
-	}
-	return "-" // invalid for a namespace
+// cacheKeyShape identifies which attribute set a SubjectAccessReviewSpec carries.
+// It is encoded as a single fixed-width byte at the head of every cache key, which
+// keeps the three shapes in disjoint key spaces no matter how many fields each
+// branch happens to encode. Upstream uses a single bool for its two shapes; a bool
+// cannot express the third shape, a spec carrying neither attribute set.
+type cacheKeyShape byte
+
+const (
+	cacheKeyShapeNeither     cacheKeyShape = 0
+	cacheKeyShapeResource    cacheKeyShape = 1
+	cacheKeyShapeNonResource cacheKeyShape = 2
+)
+
+// cacheKeyBuilder encodes the fields that identify a CheckAccess result into an
+// unambiguous byte string and hashes it. The layout follows buildKey in upstream
+// k8s.io/apiserver/pkg/endpoints/filters/impersonation/cache.go.
+//
+// Every variable-length field carries a uint32 big-endian length prefix, so no
+// field value can move a field boundary: two requests share an encoding only when
+// every field is byte-for-byte equal. Joining caller-influenced fields with a
+// separator instead leaves the boundaries ambiguous, because a field may contain
+// the separator, may be rewritten by normalization (path.Clean resolving ".."), or
+// may be replaced by a placeholder that another field can also spell (MSRC 132991).
+//
+// build appends the requestor's user name to the hash in clear text. The hash is
+// always 64 characters, so the suffix boundary is fixed and two keys are equal only
+// if their users are equal. The user name is set by the authenticator rather than
+// chosen by the caller, so a hash collision is only ever reachable among a single
+// user's own keys, where it cannot yield a permission that user does not already
+// hold. Hashing also bounds the key length regardless of caller-supplied input.
+type cacheKeyBuilder struct {
+	user    string
+	builder []byte
 }
 
-func getResultCacheKey(subRevReq *authzv1.SubjectAccessReviewSpec, allowSubresourceTypeCheck bool, enforceCSRNodeClientDataAction bool) string {
-	cacheKey := subRevReq.User
+// newCacheKeyBuilder starts a key for user and shape. It writes the shape byte and
+// the user name first so that ordering is identical for every shape.
+func newCacheKeyBuilder(user string, shape cacheKeyShape) *cacheKeyBuilder {
+	c := &cacheKeyBuilder{user: user, builder: make([]byte, 0, 256)}
+	c.builder = append(c.builder, byte(shape))
+	c.addString(user)
+	return c
+}
 
-	if subRevReq.ResourceAttributes != nil {
-		cacheKey = path.Join(cacheKey, defaultDir(subRevReq.ResourceAttributes.Namespace))
-		cacheKey = path.Join(cacheKey, defaultDir(subRevReq.ResourceAttributes.Group))
-		action := getResourceAndAction(subRevReq.ResourceAttributes.Resource, subRevReq.ResourceAttributes.Subresource, subRevReq.ResourceAttributes.Verb, enforceCSRNodeClientDataAction)
-		cacheKey = path.Join(cacheKey, action)
+// addString appends value with a uint32 big-endian length prefix.
+func (c *cacheKeyBuilder) addString(value string) {
+	var length [4]byte
+	binary.BigEndian.PutUint32(length[:], uint32(len(value)))
+	c.builder = append(c.builder, length[:]...)
+	c.builder = append(c.builder, value...)
+}
 
-		// Cache results for subresources of interest separately
-		if allowSubresourceTypeCheck {
-			if shouldHandleSubresource(subRevReq.ResourceAttributes.Resource, subRevReq.ResourceAttributes.Subresource) {
-				cacheKey = path.Join(cacheKey, subRevReq.ResourceAttributes.Subresource)
-			}
-		}
-	} else if subRevReq.NonResourceAttributes != nil {
-		cacheKey = path.Join(cacheKey, subRevReq.NonResourceAttributes.Path, getActionName(subRevReq.NonResourceAttributes.Verb))
+// build returns the hex-encoded digest of the accumulated fields, suffixed with
+// the un-hashed user name.
+func (c *cacheKeyBuilder) build() string {
+	hashed := sha256.Sum256(c.builder)
+	return hex.EncodeToString(hashed[:]) + "/" + c.user
+}
+
+// cachedSubresource returns the subresource that takes part in the cache key. Only
+// subresources carried as a distinct DataAction attribute are cached separately;
+// every other subresource shares the base resource's entry.
+func cachedSubresource(attr *authzv1.ResourceAttributes, allowSubresourceTypeCheck bool) string {
+	if allowSubresourceTypeCheck && shouldHandleSubresource(attr.Resource, attr.Subresource) {
+		return attr.Subresource
 	}
+	return ""
+}
 
-	return cacheKey
+// getResultCacheKey returns the key under which the CheckAccess result for
+// subRevReq is cached. See cacheKeyBuilder for why the encoding is length-prefixed
+// and hashed rather than joined.
+//
+// The set of fields is unchanged, so cache hit rates are unaffected: the resource
+// branch keys on the derived action from getResourceAndAction, which maps get, list
+// and watch onto "read", and the non-resource branch keys on getActionName.
+func getResultCacheKey(subRevReq *authzv1.SubjectAccessReviewSpec, allowSubresourceTypeCheck bool, enforceCSRNodeClientDataAction bool) string {
+	switch {
+	case subRevReq.ResourceAttributes != nil:
+		attr := subRevReq.ResourceAttributes
+		key := newCacheKeyBuilder(subRevReq.User, cacheKeyShapeResource)
+		key.addString(attr.Namespace)
+		key.addString(attr.Group)
+		key.addString(getResourceAndAction(attr.Resource, attr.Subresource, attr.Verb, enforceCSRNodeClientDataAction))
+		key.addString(cachedSubresource(attr, allowSubresourceTypeCheck))
+		return key.build()
+
+	case subRevReq.NonResourceAttributes != nil:
+		attr := subRevReq.NonResourceAttributes
+		key := newCacheKeyBuilder(subRevReq.User, cacheKeyShapeNonResource)
+		key.addString(attr.Path)
+		key.addString(getActionName(attr.Verb))
+		return key.build()
+
+	default:
+		return newCacheKeyBuilder(subRevReq.User, cacheKeyShapeNeither).build()
+	}
 }
 
 func prepareCheckAccessRequestBody(ctx context.Context, req *authzv1.SubjectAccessReviewSpec, clusterType string, resourceId string, useNamespaceResourceScopeFormat bool, allowCustomResourceTypeCheck bool, allowSubresourceTypeCheck bool, enforceCSRNodeClientDataAction bool) ([]*CheckAccessRequest, error) {

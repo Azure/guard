@@ -267,6 +267,8 @@ func (s Authenticator) Check(ctx context.Context, token string) (*authv1.UserInf
 		return nil, err
 	}
 
+	isServicePrincipal := isAppToken(claims)
+
 	if s.Options.ResolveGroupMembershipOnlyOnOverageClaim {
 		groups, skipGraphAPI, err := getGroupsAndCheckOverage(claims)
 		if err != nil {
@@ -276,16 +278,16 @@ func (s Authenticator) Check(ctx context.Context, token string) (*authv1.UserInf
 			resp.Groups = groups
 			return resp, nil
 		}
-		// Service principal token with >200 groups. OBO flow does not
-		// support SPNs, so short-circuit instead of letting AAD fail with
-		// a cryptic AADSTS7000113.
+
+		// Service principal token with an overage claim (>200 groups) while SP
+		// group resolution is switched off: short-circuit instead of letting the
+		// user flow fail with a cryptic AADSTS7000113.
 		//
-		// StatusOK: K8s webhook authenticator only reads and logs
-		// TokenReview Status.Error on HTTP 200. Non-200 is treated as a
-		// transport error and the message is discarded. We need this error
-		// to surface in API server logs so operators can diagnose why the
-		// SPN authentication was rejected.
-		if isAppToken(claims) {
+		// StatusOK: K8s webhook authenticator only reads and logs TokenReview
+		// Status.Error on HTTP 200. Non-200 is treated as a transport error and
+		// the message is discarded. We need this error to surface in API server
+		// logs so operators can diagnose why the SPN was rejected.
+		if !s.Options.EnableSPGroupResolution && isServicePrincipal {
 			return nil, errutils.WithCode(
 				fmt.Errorf(
 					"service principal with group membership exceeding 200 is not supported. "+
@@ -299,11 +301,20 @@ func (s Authenticator) Check(ctx context.Context, token string) (*authv1.UserInf
 		if err := s.graphClient.RefreshToken(ctx, token); err != nil {
 			return nil, err
 		}
-		resp.Groups, err = s.graphClient.GetGroups(ctx, resp.Username, token)
+		principal := resp.Username
+		if isServicePrincipal {
+			// Service principals are resolved by object ID against the
+			// /servicePrincipals resource.
+			spOID, oidErr := claims.string(azureObjectIDClaim)
+			if oidErr != nil {
+				return nil, errors.Wrap(oidErr, "unable to get oid claim for service principal")
+			}
+			principal = spOID
+		}
+		resp.Groups, err = s.graphClient.GetGroups(ctx, principal, token, isServicePrincipal)
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to get groups")
 		}
-
 	}
 	return resp, nil
 }

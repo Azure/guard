@@ -1,0 +1,104 @@
+# Copyright The Guard Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Standalone (cx underlay) variant: impersonates the real obo service.
+#
+# Guard's token URLs are chart-templated as
+#   http://obo.<namespace>.svc.cluster.local/v1/<CCPID>/(authz)token
+# with only the namespace variable - the service name, scheme and path are
+# hardcoded. Rather than editing underlay-config.json and redeploying overlaymgr,
+# this Deployment carries the label `app: obo`, which the EXISTING obo Service
+# already selects (port 80 -> targetPort 8080). Guard therefore needs no change
+# at all.
+#
+#   WARNING: this takes over token issuance for EVERY CCP on the underlay, not
+#   just your test cluster. Use only on a standalone you own.
+#
+#   Apply:     kubectl -n obo scale deployment/obo --replicas=0
+#              kubectl apply -f tokenlab-proxy-obo-swap.yaml
+#   Roll back: kubectl -n obo delete deployment/obo-tokenlab
+#              kubectl -n obo scale deployment/obo --replicas=3
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: obo-tokenlab
+  namespace: obo
+  labels:
+    app: obo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: obo
+      variant: tokenlab
+  template:
+    metadata:
+      labels:
+        # Selected by the pre-existing obo Service. This is the whole trick.
+        app: obo
+        variant: tokenlab
+    spec:
+      # Copied from obo/server/deployer/templates/base/deployment.yaml - the obo
+      # namespace runs on the infra pool, and without these the pod stays Pending.
+      tolerations:
+        - key: "agentpool"
+          operator: "Equal"
+          value: "infra"
+          effect: "NoSchedule"
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: agentpool
+                    operator: In
+                    values:
+                      - infra
+      containers:
+        - name: token-proxy
+          image: PLACEHOLDER_IMAGE
+          command: ["/token-proxy"]
+          args:
+            - --port=8080
+            - --mode=PLACEHOLDER_MODE
+            - --endpoint=PLACEHOLDER_API_VERSION
+            - --tenant-id=PLACEHOLDER_TENANT_ID
+            - --app-client-id=PLACEHOLDER_APP_CLIENT_ID
+            # NOTE: on a standalone this is the UNDERLAY's kubelet identity, which
+            # differs from the plain-AKS cluster used for the fast loop. It needs
+            # its own federated identity credential on the application.
+            - --mi-client-id=PLACEHOLDER_MI_CLIENT_ID
+            - --obo-resource=PLACEHOLDER_OBO_RESOURCE
+            - --authz-resource=PLACEHOLDER_PDP_RESOURCE
+            - --dump-claims
+            - --passthrough-errors
+          ports:
+            - containerPort: 8080
+              name: http
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 2
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

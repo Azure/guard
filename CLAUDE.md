@@ -80,11 +80,19 @@ If the action is absent, the change is breaking and there is no customer-side fi
   reachable only through a wildcard that grants far more than the caller needs. The RP
   operations manifest must ship first.
 
-Registered as of 2026-08-18: `managedClusters/pods/{read,write,delete}`,
+Registered as of 2026-09-25: `managedClusters/pods/{read,write,delete}`,
 `managedClusters/pods/exec/action`,
-`managedClusters/certificates.k8s.io/certificatesigningrequests/{read,write,delete}`.
+`managedClusters/certificates.k8s.io/certificatesigningrequests/{read,write,delete}`,
+`managedClusters/certificates.k8s.io/certificatesigningrequests/nodeclient/action`.
 NOT registered: `pods/{attach,portforward,proxy}/action`, `services/proxy/action`,
-`nodes/proxy/action`, `certificatesigningrequests/nodeclient/action`.
+`nodes/proxy/action`, `serviceaccounts/token/action`.
+
+`nodeclient/action` was NOT registered on 2026-08-18 and is registered now, so
+re-run the `az` check instead of trusting this list. Only 11 `.../action`
+DataActions exist for `managedClusters` at all, and 9 of them are verb-derived
+(impersonate, bind, escalate, use) - `pods/exec/action` and
+`nodeclient/action` are the only subresource-derived ones. Assume a new
+subresource action is unregistered until the command says otherwise.
 
 Two things that make this easy to miss in review:
 

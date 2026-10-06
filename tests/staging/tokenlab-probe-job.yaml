@@ -1,0 +1,74 @@
+# Copyright The Guard Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Runs the Entra credential matrix once and exits. Needs IMDS reachability and
+# nothing else - no Guard, no standalone environment.
+#
+# PLACEHOLDER_* values are substituted by tokenlab-setup.sh, matching the
+# convention used by guard-v2-test.yaml.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: tokenlab-probe
+  namespace: PLACEHOLDER_NAMESPACE
+spec:
+  # A failed probe run is a result to read, not something to retry blindly.
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: tokenlab-probe
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: probe
+          image: PLACEHOLDER_IMAGE
+          command: ["/probe"]
+          args:
+            - --tenant-id=PLACEHOLDER_TENANT_ID
+            - --app-client-id=PLACEHOLDER_APP_CLIENT_ID
+            - --mi-client-id=PLACEHOLDER_MI_CLIENT_ID
+            - --obo-resource=PLACEHOLDER_OBO_RESOURCE
+            - --pdp-resource=PLACEHOLDER_PDP_RESOURCE
+            # End-to-end verification: every PDP-audience token is spent on a
+            # real CheckAccess call. Without these three the probe only proves
+            # tokens were issued, never that anything accepts them.
+            - --pdp-region=PLACEHOLDER_PDP_REGION
+            - --check-subject-oid=PLACEHOLDER_CHECK_SUBJECT_OID
+            - --check-resource-id=PLACEHOLDER_CHECK_RESOURCE_ID
+            # Mounted from a Secret rather than passed on argv, so the user token
+            # never appears in `kubectl describe` or the pod spec.
+            - --user-assertion-file=/secrets/user-token
+          volumeMounts:
+            - name: user-token
+              mountPath: /secrets
+              readOnly: true
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: user-token
+          secret:
+            secretName: tokenlab-user-token
+            # Optional so the Job still runs (with the OBO rows SKIPped) before a
+            # user token has been obtained.
+            optional: true

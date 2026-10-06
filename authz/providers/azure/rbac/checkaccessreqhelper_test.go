@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/url"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -374,6 +375,8 @@ func Test_getDataActions(t *testing.T) {
 			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "arc/batch/cronjobs/write"}, IsDataAction: true}},
 		},
 
+		// approvals has no published DataAction, so it keeps collapsing into the
+		// parent delete rather than composing an ungrantable action.
 		{
 			"aks6",
 			args{
@@ -542,9 +545,8 @@ func Test_getDataActions(t *testing.T) {
 			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/serviceaccounts/write"}, IsDataAction: true}},
 		},
 
-		// The impersonate verb already encodes the privileged operation in the
-		// action name and has no subresource, so it keeps resolving through the
-		// verb mapping rather than the subresource table.
+		// The impersonate verb names the operation itself and has no subresource,
+		// so it resolves through the verb mapping, not the safe-subresource check.
 		{
 			"serviceAccountsImpersonateUnchanged",
 			args{
@@ -556,8 +558,7 @@ func Test_getDataActions(t *testing.T) {
 			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/serviceaccounts/impersonate/action"}, IsDataAction: true}},
 		},
 
-		// A non-sensitive pods subresource (e.g. status) must still collapse to
-		// the base read action so this fix does not over-restrict legitimate reads.
+		// status is safe: it collapses to the parent read action.
 		{
 			"podsStatusSubresourceStillCollapsed",
 			args{
@@ -572,7 +573,6 @@ func Test_getDataActions(t *testing.T) {
 		{
 			"csrNodeclientAKS",
 			args{
-				isWildcardTest:                 false,
 				enforceCSRNodeClientDataAction: true,
 				subRevReq: &authzv1.SubjectAccessReviewSpec{
 					ResourceAttributes: &authzv1.ResourceAttributes{Group: "certificates.k8s.io", Resource: "certificatesigningrequests", Subresource: "nodeclient", Version: "v1", Verb: "create"},
@@ -584,7 +584,6 @@ func Test_getDataActions(t *testing.T) {
 		{
 			"csrNodeclientFleet",
 			args{
-				isWildcardTest:                 false,
 				enforceCSRNodeClientDataAction: true,
 				subRevReq: &authzv1.SubjectAccessReviewSpec{
 					ResourceAttributes: &authzv1.ResourceAttributes{Group: "certificates.k8s.io", Resource: "certificatesigningrequests", Subresource: "nodeclient", Version: "v1", Verb: "create"},
@@ -596,7 +595,6 @@ func Test_getDataActions(t *testing.T) {
 		{
 			"csrNodeclientLegacyMapping",
 			args{
-				isWildcardTest: false,
 				subRevReq: &authzv1.SubjectAccessReviewSpec{
 					ResourceAttributes: &authzv1.ResourceAttributes{Group: "certificates.k8s.io", Resource: "certificatesigningrequests", Subresource: "nodeclient", Version: "v1", Verb: "create"},
 				}, clusterType: aksClusterType,
@@ -604,10 +602,11 @@ func Test_getDataActions(t *testing.T) {
 			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/certificates.k8s.io/certificatesigningrequests/write"}, IsDataAction: true}},
 		},
 
-		// CSR with a non-sensitive subresource (e.g. approval, status)
-		// should still collapse to the base action, not preserve the subresource.
+		// Subresources with no published DataAction keep collapsing into the
+		// parent action: composing one would deny requests that work today and
+		// leave no way to grant them back.
 		{
-			"csrApprovalSubresourceStillCollapsed",
+			"csrApprovalHasNoPublishedAction",
 			args{
 				isWildcardTest: false,
 				subRevReq: &authzv1.SubjectAccessReviewSpec{
@@ -615,6 +614,110 @@ func Test_getDataActions(t *testing.T) {
 				}, clusterType: aksClusterType,
 			},
 			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/certificates.k8s.io/certificatesigningrequests/write"}, IsDataAction: true}},
+		},
+
+		{
+			"podsEphemeralContainersHasNoPublishedAction",
+			args{
+				isWildcardTest: false,
+				subRevReq: &authzv1.SubjectAccessReviewSpec{
+					ResourceAttributes: &authzv1.ResourceAttributes{Group: "", Resource: "pods", Subresource: "ephemeralcontainers", Version: "v1", Name: "test", Verb: "update"},
+				}, clusterType: aksClusterType,
+			},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/pods/write"}, IsDataAction: true}},
+		},
+
+		{
+			"podsEvictionHasNoPublishedAction",
+			args{
+				isWildcardTest: false,
+				subRevReq: &authzv1.SubjectAccessReviewSpec{
+					ResourceAttributes: &authzv1.ResourceAttributes{Group: "", Resource: "pods", Subresource: "eviction", Version: "v1", Name: "test", Verb: "create"},
+				}, clusterType: aksClusterType,
+			},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/pods/write"}, IsDataAction: true}},
+		},
+
+		{
+			"podsBindingHasNoPublishedAction",
+			args{
+				isWildcardTest: false,
+				subRevReq: &authzv1.SubjectAccessReviewSpec{
+					ResourceAttributes: &authzv1.ResourceAttributes{Group: "", Resource: "pods", Subresource: "binding", Version: "v1", Name: "test", Verb: "create"},
+				}, clusterType: aksClusterType,
+			},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/pods/write"}, IsDataAction: true}},
+		},
+
+		{
+			"podsResizeHasNoPublishedAction",
+			args{
+				isWildcardTest: false,
+				subRevReq: &authzv1.SubjectAccessReviewSpec{
+					ResourceAttributes: &authzv1.ResourceAttributes{Group: "", Resource: "pods", Subresource: "resize", Version: "v1", Name: "test", Verb: "patch"},
+				}, clusterType: aksClusterType,
+			},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/pods/write"}, IsDataAction: true}},
+		},
+
+		{
+			"namespacesFinalizeHasNoPublishedAction",
+			args{
+				isWildcardTest: false,
+				subRevReq: &authzv1.SubjectAccessReviewSpec{
+					ResourceAttributes: &authzv1.ResourceAttributes{Group: "", Resource: "namespaces", Subresource: "finalize", Version: "v1", Name: "test", Verb: "update"},
+				}, clusterType: aksClusterType,
+			},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/namespaces/write"}, IsDataAction: true}},
+		},
+
+		// pods/exec is the counter-case: its action IS published, so it stays
+		// distinct rather than collapsing into pods/write.
+		{
+			"podsExecHasPublishedAction",
+			args{
+				isWildcardTest: false,
+				subRevReq: &authzv1.SubjectAccessReviewSpec{
+					ResourceAttributes: &authzv1.ResourceAttributes{Group: "", Resource: "pods", Subresource: "exec", Version: "v1", Name: "test", Verb: "create"},
+				}, clusterType: aksClusterType,
+			},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/pods/exec/action"}, IsDataAction: true}},
+		},
+
+		// Safe subresources collapse: upstream's view role grants them with the parent.
+		{
+			"podsLogSubresourceCollapses",
+			args{
+				isWildcardTest: false,
+				subRevReq: &authzv1.SubjectAccessReviewSpec{
+					ResourceAttributes: &authzv1.ResourceAttributes{Group: "", Resource: "pods", Subresource: "log", Version: "v1", Name: "test", Verb: "get"},
+				}, clusterType: aksClusterType,
+			},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/pods/read"}, IsDataAction: true}},
+		},
+
+		{
+			"deploymentsScaleSubresourceCollapses",
+			args{
+				isWildcardTest: false,
+				subRevReq: &authzv1.SubjectAccessReviewSpec{
+					ResourceAttributes: &authzv1.ResourceAttributes{Group: "apps", Resource: "deployments", Subresource: "scale", Version: "v1", Name: "test", Verb: "update"},
+				}, clusterType: aksClusterType,
+			},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/apps/deployments/write"}, IsDataAction: true}},
+		},
+
+		// An unclassified subresource - future Kubernetes, a CRD, an aggregated
+		// API - must not inherit the parent's permission. This is the inversion.
+		{
+			"unknownSubresourceIsNotCollapsed",
+			args{
+				isWildcardTest: false,
+				subRevReq: &authzv1.SubjectAccessReviewSpec{
+					ResourceAttributes: &authzv1.ResourceAttributes{Group: "", Resource: "pods", Subresource: "somefuturesubresource", Version: "v1", Name: "test", Verb: "get"},
+				}, clusterType: aksClusterType,
+			},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/pods/somefuturesubresource/action"}, IsDataAction: true}},
 		},
 
 		{
@@ -1425,183 +1528,265 @@ func Test_prepareCheckAccessRequestBodyWithSubresourceDisabled(t *testing.T) {
 	}
 }
 
-func Test_getResultCacheKey(t *testing.T) {
-	type args struct {
-		subRevReq                      *authzv1.SubjectAccessReviewSpec
-		allowSubresourceTypeCheck      bool
-		enforceCSRNodeClientDataAction bool
+// Cache keys are SHA-256 digests, so the tests below assert invariants rather
+// than literal key strings: asserting a hardcoded digest would only restate the
+// implementation.
+
+const (
+	cacheKeyTestUser  = "alpha@bing.com"
+	cacheKeyTestGroup = "apps"
+)
+
+// cacheKeyDigestPattern matches the hashed portion of a cache key.
+var cacheKeyDigestPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// cacheKeyCase is one input to getResultCacheKey.
+type cacheKeyCase struct {
+	name                      string
+	subRevReq                 *authzv1.SubjectAccessReviewSpec
+	allowSubresourceTypeCheck bool
+}
+
+// cacheKeyDistinctCases returns requests whose cache keys must all differ. It
+// covers the field encodings that a joined key rendered ambiguous: the "-"
+// placeholder that an empty namespace or group used to be mapped onto, a user
+// name carrying the "/" separator, and a namespace/group pair whose boundary can
+// be shifted without changing their concatenation.
+func cacheKeyDistinctCases() []cacheKeyCase {
+	resourceCase := func(name, user, namespace, group string) cacheKeyCase {
+		return cacheKeyCase{
+			name: name,
+			subRevReq: &authzv1.SubjectAccessReviewSpec{
+				User: user,
+				ResourceAttributes: &authzv1.ResourceAttributes{
+					Namespace: namespace, Group: group, Resource: "pods", Verb: "get",
+				},
+			},
+		}
 	}
-	tests := []struct {
-		name string
-		args args
-		want string
-	}{
-		{
-			aksClusterType,
-			args{
-				subRevReq: &authzv1.SubjectAccessReviewSpec{
-					User:                  "charlie@yahoo.com",
-					NonResourceAttributes: &authzv1.NonResourceAttributes{Path: "/apis/v1", Verb: "list"},
-				},
-				allowSubresourceTypeCheck: false,
-			},
-			"charlie@yahoo.com/apis/v1/read",
-		},
 
-		{
-			aksClusterType,
-			args{
-				subRevReq: &authzv1.SubjectAccessReviewSpec{
-					User:                  "echo@outlook.com",
-					NonResourceAttributes: &authzv1.NonResourceAttributes{Path: "/logs", Verb: "get"},
+	subresourceCase := func(name string, allowSubresourceTypeCheck bool) cacheKeyCase {
+		return cacheKeyCase{
+			name: name,
+			subRevReq: &authzv1.SubjectAccessReviewSpec{
+				User: cacheKeyTestUser,
+				ResourceAttributes: &authzv1.ResourceAttributes{
+					Namespace: "sub", Resource: "pods", Subresource: "logs", Verb: "get",
 				},
-				allowSubresourceTypeCheck: false,
 			},
-			"echo@outlook.com/logs/read",
-		},
+			allowSubresourceTypeCheck: allowSubresourceTypeCheck,
+		}
+	}
 
+	return []cacheKeyCase{
+		resourceCase("empty namespace", cacheKeyTestUser, "", cacheKeyTestGroup),
+		resourceCase("namespace equal to the former empty placeholder", cacheKeyTestUser, "-", cacheKeyTestGroup),
+		resourceCase("empty group", cacheKeyTestUser, "dev", ""),
+		resourceCase("group equal to the former empty placeholder", cacheKeyTestUser, "dev", "-"),
+		resourceCase("namespace and group split as ab|c", cacheKeyTestUser, "ab", "c"),
+		resourceCase("namespace and group split as a|bc", cacheKeyTestUser, "a", "bc"),
+		resourceCase("user carrying the separator, short namespace", "a/b", "c", cacheKeyTestGroup),
+		resourceCase("user without the separator, long namespace", "a", "b/c", cacheKeyTestGroup),
+		subresourceCase("subresource check disabled", false),
+		subresourceCase("subresource check enabled", true),
+		// An unsafe subresource resolves to its own action, so it must not share
+		// the parent's cache entry even though the subresource is not on the key.
 		{
-			aksClusterType,
-			args{
-				subRevReq: &authzv1.SubjectAccessReviewSpec{
-					User: "alpha@bing.com",
-					ResourceAttributes: &authzv1.ResourceAttributes{
-						Namespace: "dev", Group: "", Resource: "pods",
-						Subresource: "status", Version: "v1", Name: "test", Verb: "delete",
-					},
+			name: "parent resource without a subresource",
+			subRevReq: &authzv1.SubjectAccessReviewSpec{
+				User: cacheKeyTestUser,
+				ResourceAttributes: &authzv1.ResourceAttributes{
+					Namespace: "sub", Resource: "serviceaccounts", Verb: "create",
 				},
-				allowSubresourceTypeCheck: false,
 			},
-			"alpha@bing.com/dev/-/pods/delete",
 		},
-
 		{
-			aksClusterType,
-			args{
-				subRevReq: &authzv1.SubjectAccessReviewSpec{
-					User: "alpha@bing.com",
-					ResourceAttributes: &authzv1.ResourceAttributes{
-						Namespace: "dev", Group: "", Resource: "pods",
-						Subresource: "status", Version: "v1", Name: "test", Verb: "delete",
-					},
+			name: "unsafe subresource of that parent resource",
+			subRevReq: &authzv1.SubjectAccessReviewSpec{
+				User: cacheKeyTestUser,
+				ResourceAttributes: &authzv1.ResourceAttributes{
+					Namespace: "sub", Resource: "serviceaccounts", Subresource: "token", Verb: "create",
 				},
-				allowSubresourceTypeCheck: true,
 			},
-			"alpha@bing.com/dev/-/pods/delete",
 		},
-
 		{
-			aksClusterType,
-			args{
-				subRevReq: &authzv1.SubjectAccessReviewSpec{
-					User: "alpha@bing.com",
-					ResourceAttributes: &authzv1.ResourceAttributes{
-						Namespace: "dev", Group: "", Resource: "pods",
-						Subresource: "logs", Version: "v1", Name: "test", Verb: "get",
-					},
+			name: "resource request",
+			subRevReq: &authzv1.SubjectAccessReviewSpec{
+				User: cacheKeyTestUser,
+				ResourceAttributes: &authzv1.ResourceAttributes{
+					Namespace: "shape", Group: cacheKeyTestGroup, Resource: "deployments", Verb: "get",
 				},
-				allowSubresourceTypeCheck: false,
 			},
-			"alpha@bing.com/dev/-/pods/read",
 		},
-
 		{
-			aksClusterType,
-			args{
-				subRevReq: &authzv1.SubjectAccessReviewSpec{
-					User: "alpha@bing.com",
-					ResourceAttributes: &authzv1.ResourceAttributes{
-						Namespace: "dev", Group: "", Resource: "pods",
-						Subresource: "logs", Version: "v1", Name: "test", Verb: "get",
-					},
-				},
-				allowSubresourceTypeCheck: true,
+			name: "non-resource request",
+			subRevReq: &authzv1.SubjectAccessReviewSpec{
+				User:                  cacheKeyTestUser,
+				NonResourceAttributes: &authzv1.NonResourceAttributes{Path: "/healthz", Verb: "get"},
 			},
-			"alpha@bing.com/dev/-/pods/read/logs",
 		},
-
 		{
-			"arc",
-			args{
-				subRevReq: &authzv1.SubjectAccessReviewSpec{
-					User: "beta@msn.com",
-					ResourceAttributes: &authzv1.ResourceAttributes{
-						Namespace: "azure-arc",
-						Group:     "authentication.k8s.io", Resource: "userextras", Subresource: "scopes", Version: "v1",
-						Name: "test", Verb: "impersonate",
-					},
-				},
-				allowSubresourceTypeCheck: false,
-			},
-			"beta@msn.com/azure-arc/authentication.k8s.io/userextras/impersonate/action",
-		},
-
-		{
-			"arc",
-			args{
-				subRevReq: &authzv1.SubjectAccessReviewSpec{
-					User: "beta@msn.com",
-					ResourceAttributes: &authzv1.ResourceAttributes{
-						Namespace: "", Group: "", Resource: "nodes",
-						Subresource: "scopes", Version: "v1", Name: "", Verb: "list",
-					},
-				},
-				allowSubresourceTypeCheck: false,
-			},
-			"beta@msn.com/-/-/nodes/read",
-		},
-
-		{
-			"csrNodeclientEnforced",
-			args{
-				subRevReq: &authzv1.SubjectAccessReviewSpec{
-					User: "node@example.com",
-					ResourceAttributes: &authzv1.ResourceAttributes{
-						Group: "certificates.k8s.io", Resource: "certificatesigningrequests",
-						Subresource: "nodeclient", Version: "v1", Verb: "create",
-					},
-				},
-				enforceCSRNodeClientDataAction: true,
-			},
-			"node@example.com/-/certificates.k8s.io/certificatesigningrequests/nodeclient/action",
-		},
-
-		{
-			"allStar",
-			args{
-				subRevReq: &authzv1.SubjectAccessReviewSpec{
-					User: "beta@msn.com",
-					ResourceAttributes: &authzv1.ResourceAttributes{
-						Namespace: "", Group: "*", Resource: "*",
-						Subresource: "scopes", Version: "v1", Name: "", Verb: "*",
-					},
-				},
-				allowSubresourceTypeCheck: false,
-			},
-			"beta@msn.com/-/*/*/*",
-		},
-
-		{
-			"allStarNSscope",
-			args{
-				subRevReq: &authzv1.SubjectAccessReviewSpec{
-					User: "beta@msn.com",
-					ResourceAttributes: &authzv1.ResourceAttributes{
-						Namespace: "dev", Group: "*", Resource: "*",
-						Subresource: "scopes", Version: "v1", Name: "", Verb: "*",
-					},
-				},
-				allowSubresourceTypeCheck: false,
-			},
-			"beta@msn.com/dev/*/*/*",
+			name:      "neither resource nor non-resource attributes",
+			subRevReq: &authzv1.SubjectAccessReviewSpec{User: cacheKeyTestUser},
 		},
 	}
-	for _, tt := range tests {
+}
+
+// Test_getResultCacheKey_distinctRequestsGetDistinctKeys asserts that requests
+// which must not share a cached decision also do not share a cache key.
+func Test_getResultCacheKey_distinctRequestsGetDistinctKeys(t *testing.T) {
+	cases := cacheKeyDistinctCases()
+	seen := make(map[string]string, len(cases))
+
+	for _, tt := range cases {
+		got := getResultCacheKey(tt.subRevReq, tt.allowSubresourceTypeCheck, false)
+		if previous, collides := seen[got]; collides {
+			t.Errorf("%q and %q share cache key %q", previous, tt.name, got)
+			continue
+		}
+		seen[got] = tt.name
+	}
+}
+
+// Test_getResultCacheKey_isDeterministic asserts the key depends only on the
+// request, so a cached decision stays reachable across calls.
+func Test_getResultCacheKey_isDeterministic(t *testing.T) {
+	for _, tt := range cacheKeyDistinctCases() {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := getResultCacheKey(tt.args.subRevReq, tt.args.allowSubresourceTypeCheck, tt.args.enforceCSRNodeClientDataAction); got != tt.want {
-				t.Errorf("getResultCacheKey() = %v, want %v", got, tt.want)
+			want := getResultCacheKey(tt.subRevReq, tt.allowSubresourceTypeCheck, false)
+			for i := 0; i < 3; i++ {
+				if got := getResultCacheKey(tt.subRevReq, tt.allowSubresourceTypeCheck, false); got != want {
+					t.Errorf("getResultCacheKey() repeat %d = %q, want %q", i, got, want)
+				}
 			}
 		})
+	}
+}
+
+func Test_getResultCacheKey_CSRNodeClientFlagChangesKey(t *testing.T) {
+	request := &authzv1.SubjectAccessReviewSpec{
+		User: cacheKeyTestUser,
+		ResourceAttributes: &authzv1.ResourceAttributes{
+			Group: "certificates.k8s.io", Resource: "certificatesigningrequests",
+			Subresource: "nodeclient", Verb: "create",
+		},
+	}
+
+	legacyKey := getResultCacheKey(request, false, false)
+	enforcedKey := getResultCacheKey(request, false, true)
+	if legacyKey == enforcedKey {
+		t.Errorf("getResultCacheKey() = %q for both legacy and enforced CSR nodeclient mappings, want different keys", legacyKey)
+	}
+}
+
+// Test_getResultCacheKey_isUserNamespaced asserts every key is a hex digest
+// suffixed with the un-hashed user name. Because the digest is fixed width, the
+// suffix boundary is unambiguous and keys of two different users can never be
+// equal, which confines any digest collision to a single user's own keys.
+func Test_getResultCacheKey_isUserNamespaced(t *testing.T) {
+	for _, tt := range cacheKeyDistinctCases() {
+		t.Run(tt.name, func(t *testing.T) {
+			got := getResultCacheKey(tt.subRevReq, tt.allowSubresourceTypeCheck, false)
+
+			suffix := "/" + tt.subRevReq.User
+			if !strings.HasSuffix(got, suffix) {
+				t.Fatalf("getResultCacheKey() = %q, want suffix %q", got, suffix)
+			}
+
+			digest := strings.TrimSuffix(got, suffix)
+			if !cacheKeyDigestPattern.MatchString(digest) {
+				t.Errorf("getResultCacheKey() digest = %q, want 64 lowercase hex characters", digest)
+			}
+		})
+	}
+}
+
+// Test_getResultCacheKey_readVerbsShareCacheKey pins the cache hit semantics that
+// the key must preserve: get, list and watch all map to the "read" action and so
+// share one entry. It fails if the key is ever derived from the raw verb.
+func Test_getResultCacheKey_readVerbsShareCacheKey(t *testing.T) {
+	readVerbs := []string{"list", "watch"}
+
+	for _, allowSubresourceTypeCheck := range []bool{false, true} {
+		resourceKey := func(verb string) string {
+			return getResultCacheKey(&authzv1.SubjectAccessReviewSpec{
+				User: cacheKeyTestUser,
+				ResourceAttributes: &authzv1.ResourceAttributes{
+					Namespace: "dev", Resource: "secrets", Verb: verb,
+				},
+			}, allowSubresourceTypeCheck, false)
+		}
+		nonResourceKey := func(verb string) string {
+			return getResultCacheKey(&authzv1.SubjectAccessReviewSpec{
+				User:                  cacheKeyTestUser,
+				NonResourceAttributes: &authzv1.NonResourceAttributes{Path: "/healthz", Verb: verb},
+			}, allowSubresourceTypeCheck, false)
+		}
+
+		for _, keyFor := range []func(string) string{resourceKey, nonResourceKey} {
+			want := keyFor("get")
+			for _, verb := range readVerbs {
+				if got := keyFor(verb); got != want {
+					t.Errorf("verb %q (allowSubresourceTypeCheck=%v) key = %q, want the get key %q",
+						verb, allowSubresourceTypeCheck, got, want)
+				}
+			}
+			if got := keyFor("delete"); got == want {
+				t.Errorf("verb delete (allowSubresourceTypeCheck=%v) must not share the read key %q",
+					allowSubresourceTypeCheck, want)
+			}
+		}
+	}
+}
+
+// Test_getResultCacheKey_noResourceNonResourceCollision is the regression test
+// for MSRC 132991. A non-resource path whose ".." segments normalize down to a
+// resource's path (e.g. "/apiz/../-/-/secrets") must NOT produce the same cache
+// key as the corresponding resource request (a cluster-wide list of secrets), so
+// a decision cached for one request is never served for a different one.
+func Test_getResultCacheKey_noResourceNonResourceCollision(t *testing.T) {
+	const user = "eve@contoso.com"
+
+	// getActionName maps get/list/watch all to "read", and the object name and
+	// ResourceRequest flag are not part of the key, so these share one key.
+	resourceVariants := []*authzv1.SubjectAccessReviewSpec{
+		{User: user, ResourceAttributes: &authzv1.ResourceAttributes{Resource: "secrets", Verb: "list"}},
+		{User: user, ResourceAttributes: &authzv1.ResourceAttributes{Resource: "secrets", Verb: "get"}},
+		{User: user, ResourceAttributes: &authzv1.ResourceAttributes{Resource: "secrets", Verb: "watch"}},
+	}
+
+	// Non-resource paths that path.Clean would normalize onto the secrets key.
+	craftedPaths := []string{
+		"/apiz/../-/-/secrets",
+		"/api/../-/-/secrets",
+		"/healthzz/../-/-/secrets",
+		"/openapiz/../-/-/secrets",
+	}
+
+	for _, allowSubresourceTypeCheck := range []bool{false, true} {
+		resourceKeys := make(map[string]struct{})
+		for _, r := range resourceVariants {
+			resourceKeys[getResultCacheKey(r, allowSubresourceTypeCheck, false)] = struct{}{}
+		}
+
+		nonResourceKeys := make(map[string]string, len(craftedPaths))
+		for _, p := range craftedPaths {
+			nonRes := &authzv1.SubjectAccessReviewSpec{
+				User:                  user,
+				NonResourceAttributes: &authzv1.NonResourceAttributes{Path: p, Verb: "get"},
+			}
+			got := getResultCacheKey(nonRes, allowSubresourceTypeCheck, false)
+			if _, collides := resourceKeys[got]; collides {
+				t.Errorf("non-resource path %q (allowSubresourceTypeCheck=%v) collides with a secrets resource cache key: %q",
+					p, allowSubresourceTypeCheck, got)
+			}
+			if previous, collides := nonResourceKeys[got]; collides {
+				t.Errorf("non-resource paths %q and %q (allowSubresourceTypeCheck=%v) share cache key %q",
+					previous, p, allowSubresourceTypeCheck, got)
+				continue
+			}
+			nonResourceKeys[got] = p
+		}
 	}
 }
 

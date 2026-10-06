@@ -1,0 +1,83 @@
+# Copyright The Guard Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# token-proxy for the fast loop on a plain AKS cluster. Point Guard at it with:
+#   --azure.aks-token-url=http://tokenlab-proxy.<ns>.svc:8080/v1/<ccpid>/token
+#   --azure.aks-authz-token-url=http://tokenlab-proxy.<ns>.svc:8080/v1/<ccpid>/authztoken
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tokenlab-proxy
+  namespace: PLACEHOLDER_NAMESPACE
+  labels:
+    app: tokenlab-proxy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tokenlab-proxy
+  template:
+    metadata:
+      labels:
+        app: tokenlab-proxy
+    spec:
+      containers:
+        - name: token-proxy
+          image: PLACEHOLDER_IMAGE
+          command: ["/token-proxy"]
+          args:
+            - --port=8080
+            - --mode=PLACEHOLDER_MODE
+            - --endpoint=PLACEHOLDER_API_VERSION
+            - --tenant-id=PLACEHOLDER_TENANT_ID
+            - --app-client-id=PLACEHOLDER_APP_CLIENT_ID
+            - --mi-client-id=PLACEHOLDER_MI_CLIENT_ID
+            - --obo-resource=PLACEHOLDER_OBO_RESOURCE
+            - --authz-resource=PLACEHOLDER_PDP_RESOURCE
+            - --dump-claims
+            # Returns Entra's status and body to Guard, so the AADSTS code reaches
+            # Guard's logs and kubectl output instead of being flattened to a 500.
+            - --passthrough-errors
+          ports:
+            - containerPort: 8080
+              name: http
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 2
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tokenlab-proxy
+  namespace: PLACEHOLDER_NAMESPACE
+spec:
+  selector:
+    app: tokenlab-proxy
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
