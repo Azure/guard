@@ -52,11 +52,13 @@ const (
 	NonAADUserNotAllowedVerdict = "Access denied by Azure RBAC for non AAD users. Configure --azure.skip-authz-for-non-aad-users to enable access. If you are an AAD user, please set Extra:oid parameter for impersonated user in the kubeconfig."
 	CheckAccessErrorVerdict     = "Access denied due to Azure RBAC check failure. Please retry later."
 	PodsResource                = "pods"
+	CSRResource                 = "certificatesigningrequests"
 	CustomResources             = "customresources"
 	StatusSubresource           = "status"
 	ScaleSubresource            = "scale"
 	LogSubresource              = "log"
 	LogsSubresource             = "logs"
+	NodeClientSubresource       = "nodeclient"
 	actionSuffix                = "action"
 	wildcardValue               = "*"
 	ReadVerb                    = "read"
@@ -308,11 +310,15 @@ func collapsesIntoParent(subResource string) bool {
 	return unregistered
 }
 
-func getResourceAndAction(resource string, subResource string, verb string) string {
+func getResourceAndAction(resource string, subResource string, verb string, enforceCSRNodeClientDataAction bool) string {
 	action := getActionName(verb)
 
 	// Wildcards are expanded from the operations map elsewhere.
 	if subResource == "" || subResource == wildcardValue || resource == wildcardValue || action == wildcardValue {
+		return path.Join(resource, action)
+	}
+
+	if resource == CSRResource && subResource == NodeClientSubresource && !enforceCSRNodeClientDataAction {
 		return path.Join(resource, action)
 	}
 
@@ -329,7 +335,7 @@ func getResourceAndAction(resource string, subResource string, verb string) stri
 	return path.Join(resource, subResource, actionSuffix)
 }
 
-func getDataActions(ctx context.Context, subRevReq *authzv1.SubjectAccessReviewSpec, clusterType string, allowCustomResourceTypeCheck bool, allowSubresourceTypeCheck bool) ([]azureutils.AuthorizationActionInfo, error) {
+func getDataActions(ctx context.Context, subRevReq *authzv1.SubjectAccessReviewSpec, clusterType string, allowCustomResourceTypeCheck bool, allowSubresourceTypeCheck bool, enforceCSRNodeClientDataAction bool) ([]azureutils.AuthorizationActionInfo, error) {
 	var authInfoList []azureutils.AuthorizationActionInfo
 	var err error
 	log := klog.FromContext(ctx)
@@ -370,7 +376,7 @@ func getDataActions(ctx context.Context, subRevReq *authzv1.SubjectAccessReviewS
 				authInfoSingle.AuthorizationEntity.Id = path.Join(authInfoSingle.AuthorizationEntity.Id, subRevReq.ResourceAttributes.Group)
 			}
 
-			action := getResourceAndAction(subRevReq.ResourceAttributes.Resource, subRevReq.ResourceAttributes.Subresource, subRevReq.ResourceAttributes.Verb)
+			action := getResourceAndAction(subRevReq.ResourceAttributes.Resource, subRevReq.ResourceAttributes.Subresource, subRevReq.ResourceAttributes.Verb, enforceCSRNodeClientDataAction)
 			authInfoSingle.AuthorizationEntity.Id = path.Join(authInfoSingle.AuthorizationEntity.Id, action)
 			if allowSubresourceTypeCheck {
 				err = setAuthInfoSubresourceAttributes(&authInfoSingle, subRevReq)
@@ -742,14 +748,14 @@ func cachedSubresource(attr *authzv1.ResourceAttributes, allowSubresourceTypeChe
 // The set of fields is unchanged, so cache hit rates are unaffected: the resource
 // branch keys on the derived action from getResourceAndAction, which maps get, list
 // and watch onto "read", and the non-resource branch keys on getActionName.
-func getResultCacheKey(subRevReq *authzv1.SubjectAccessReviewSpec, allowSubresourceTypeCheck bool) string {
+func getResultCacheKey(subRevReq *authzv1.SubjectAccessReviewSpec, allowSubresourceTypeCheck bool, enforceCSRNodeClientDataAction bool) string {
 	switch {
 	case subRevReq.ResourceAttributes != nil:
 		attr := subRevReq.ResourceAttributes
 		key := newCacheKeyBuilder(subRevReq.User, cacheKeyShapeResource)
 		key.addString(attr.Namespace)
 		key.addString(attr.Group)
-		key.addString(getResourceAndAction(attr.Resource, attr.Subresource, attr.Verb))
+		key.addString(getResourceAndAction(attr.Resource, attr.Subresource, attr.Verb, enforceCSRNodeClientDataAction))
 		key.addString(cachedSubresource(attr, allowSubresourceTypeCheck))
 		return key.build()
 
@@ -765,7 +771,7 @@ func getResultCacheKey(subRevReq *authzv1.SubjectAccessReviewSpec, allowSubresou
 	}
 }
 
-func prepareCheckAccessRequestBody(ctx context.Context, req *authzv1.SubjectAccessReviewSpec, clusterType string, resourceId string, useNamespaceResourceScopeFormat bool, allowCustomResourceTypeCheck bool, allowSubresourceTypeCheck bool) ([]*CheckAccessRequest, error) {
+func prepareCheckAccessRequestBody(ctx context.Context, req *authzv1.SubjectAccessReviewSpec, clusterType string, resourceId string, useNamespaceResourceScopeFormat bool, allowCustomResourceTypeCheck bool, allowSubresourceTypeCheck bool, enforceCSRNodeClientDataAction bool) ([]*CheckAccessRequest, error) {
 	/* This is how sample SubjectAccessReview request will look like
 		{
 			"kind": "SubjectAccessReview",
@@ -828,7 +834,7 @@ func prepareCheckAccessRequestBody(ctx context.Context, req *authzv1.SubjectAcce
 		return nil, errutils.WithCode(fmt.Errorf("oid info not sent from authentication module"), http.StatusBadRequest)
 	}
 	groups := getValidSecurityGroups(req.Groups)
-	actions, err := getDataActions(ctx, req, clusterType, allowCustomResourceTypeCheck, allowSubresourceTypeCheck)
+	actions, err := getDataActions(ctx, req, clusterType, allowCustomResourceTypeCheck, allowSubresourceTypeCheck, enforceCSRNodeClientDataAction)
 	if err != nil {
 		return nil, errutils.WithCode(fmt.Errorf("Error while creating list of dataactions for check access call: %w", err), http.StatusInternalServerError)
 	}

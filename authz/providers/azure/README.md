@@ -284,6 +284,12 @@ Two traps make this easy to miss:
   node and controller identities stop there and never reach the mapping. Only a cluster
   whose kubelet uses an Entra ID identity sends these requests to CheckAccess.
 
+The `--azure.enforce-csr-nodeclient-data-action` rollout flag controls the
+`certificatesigningrequests/nodeclient` mapping. It defaults to `false`, which preserves
+the legacy `certificatesigningrequests/write` action. Set it to `true` only after the
+dedicated operation is published and affected custom roles have migrated. Turning it
+back off restores the legacy mapping without rolling back the Guard image.
+
 ### Two different subresource mechanisms
 
 Guard handles subresources in two separate places. They use separate lists and serve
@@ -638,6 +644,7 @@ AKS_AUTHZ_TOKEN_URL="https://${FQDN}:443/authz/token"
 | `--azure.discover-resources-frequency`       | Discovery refresh interval     | 5m      |
 | `--azure.allow-custom-resource-type-check`   | Enable CRD support             | false   |
 | `--azure.allow-subresource-type-check`       | Enable subresource perms       | false   |
+| `--azure.enforce-csr-nodeclient-data-action` | Enforce CSR nodeclient action  | false   |
 | `--azure.audit-sar`                          | Log all SAR requests           | false   |
 
 ### Prometheus Metrics
