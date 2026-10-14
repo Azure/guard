@@ -886,6 +886,14 @@ func ConvertCheckAccessResponse(ctx context.Context, username string, body []byt
 		return nil, errutils.WithCode(fmt.Errorf("Error in unmarshalling check access response: %w", err), http.StatusInternalServerError)
 	}
 
+	// An empty array satisfies the "no denied result" branch below, which then reads
+	// response[0] and panics. The panic happens in an errgroup child goroutine, where
+	// neither errgroup nor the server's recovery middleware can catch it, so it takes
+	// the whole process down. Absent any decision there is nothing to honour: fail closed.
+	if len(response) == 0 {
+		return nil, errutils.WithCode(fmt.Errorf("Check access response contained no authorization decisions"), http.StatusInternalServerError)
+	}
+
 	deniedResultFound := slices.IndexFunc(response, func(a AuthorizationDecision) bool { return strings.ToLower(a.Decision) != Allowed })
 
 	if deniedResultFound == -1 { // no denied result found
