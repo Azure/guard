@@ -130,7 +130,7 @@ type DenyAssignment struct {
 
 type AzureDenyAssignment struct {
 	MetaData          map[string]interface{} `json:"metadata"`
-	IsSystemProtected string                 `json:"isSystemProtected"`
+	IsSystemProtected bool                   `json:"isSystemProtected"`
 	IsBuiltIn         bool                   `json:"isBuiltIn"`
 	DenyAssignment
 }
