@@ -506,8 +506,10 @@ func Test_getDataActions(t *testing.T) {
 
 		// serviceaccounts/token is the TokenRequest API. Upstream Kubernetes
 		// lists it as its own resource in the aggregate-to-edit ClusterRole,
-		// separate from the write rule on serviceaccounts, so it must produce a
-		// distinct DataAction instead of collapsing onto serviceaccounts/write.
+		// separate from the write rule on serviceaccounts, so it must not
+		// collapse onto serviceaccounts/write. The provider publishes no
+		// serviceaccounts/token action, so it maps onto the published
+		// impersonate action, which carries the same authority.
 		{
 			"serviceAccountsTokenCreateAKS",
 			args{
@@ -516,7 +518,7 @@ func Test_getDataActions(t *testing.T) {
 					ResourceAttributes: &authzv1.ResourceAttributes{Group: "", Resource: "serviceaccounts", Subresource: "token", Version: "v1", Name: "test", Verb: "create"},
 				}, clusterType: aksClusterType,
 			},
-			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/serviceaccounts/token/action"}, IsDataAction: true}},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/serviceaccounts/impersonate/action"}, IsDataAction: true}},
 		},
 
 		{
@@ -527,7 +529,72 @@ func Test_getDataActions(t *testing.T) {
 					ResourceAttributes: &authzv1.ResourceAttributes{Group: "", Resource: "serviceaccounts", Subresource: "token", Version: "v1", Name: "test", Verb: "create"},
 				}, clusterType: "fleet",
 			},
-			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "fleet/serviceaccounts/token/action"}, IsDataAction: true}},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "fleet/serviceaccounts/impersonate/action"}, IsDataAction: true}},
+		},
+
+		// Injecting an ephemeral container executes code in the running Pod, so
+		// it must not be authorized by pods/write. The provider publishes no
+		// ephemeralcontainers action, so it maps onto pods/exec/action.
+		{
+			"podsEphemeralContainersPatchAKS",
+			args{
+				isWildcardTest: false,
+				subRevReq: &authzv1.SubjectAccessReviewSpec{
+					ResourceAttributes: &authzv1.ResourceAttributes{Group: "", Resource: "pods", Subresource: EphemeralContainersSubresource, Version: "v1", Name: "test", Verb: "patch"},
+				}, clusterType: aksClusterType,
+			},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/pods/exec/action"}, IsDataAction: true}},
+		},
+
+		{
+			"podsEphemeralContainersUpdateFleet",
+			args{
+				isWildcardTest: false,
+				subRevReq: &authzv1.SubjectAccessReviewSpec{
+					ResourceAttributes: &authzv1.ResourceAttributes{Group: "", Resource: "pods", Subresource: EphemeralContainersSubresource, Version: "v1", Name: "test", Verb: "update"},
+				}, clusterType: "fleet",
+			},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "fleet/pods/exec/action"}, IsDataAction: true}},
+		},
+
+		// The mapping is deliberately verb-agnostic: a read of the subresource
+		// maps to exec/action too, rather than collapsing to pods/read. Pinned
+		// so a later verb-aware refactor cannot flip it silently.
+		{
+			"podsEphemeralContainersGetAKS",
+			args{
+				isWildcardTest: false,
+				subRevReq: &authzv1.SubjectAccessReviewSpec{
+					ResourceAttributes: &authzv1.ResourceAttributes{Group: "", Resource: "pods", Subresource: EphemeralContainersSubresource, Version: "v1", Name: "test", Verb: "get"},
+				}, clusterType: aksClusterType,
+			},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/pods/exec/action"}, IsDataAction: true}},
+		},
+
+		// Writing the Pod object itself is unchanged, so the mapping does not
+		// over-restrict ordinary Pod CRUD.
+		{
+			"podsCreateUnchangedAKS",
+			args{
+				isWildcardTest: false,
+				subRevReq: &authzv1.SubjectAccessReviewSpec{
+					ResourceAttributes: &authzv1.ResourceAttributes{Group: "", Resource: "pods", Version: "v1", Name: "test", Verb: "create"},
+				}, clusterType: aksClusterType,
+			},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/pods/write"}, IsDataAction: true}},
+		},
+
+		// A subresource that is mapped on one resource must not be mapped on a
+		// different resource: the table is keyed by resource/subresource pair.
+		{
+			"otherResourceTokenSubresourceUnmappedAKS",
+			args{
+				isWildcardTest: false,
+				subRevReq: &authzv1.SubjectAccessReviewSpec{
+					ResourceAttributes: &authzv1.ResourceAttributes{Group: "", Resource: "secrets", Subresource: "token", Version: "v1", Name: "test", Verb: "create"},
+				}, clusterType: aksClusterType,
+			},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/secrets/token/action"}, IsDataAction: true}},
 		},
 
 		// Writing the ServiceAccount object itself is unchanged: it must still
@@ -581,17 +648,6 @@ func Test_getDataActions(t *testing.T) {
 				}, clusterType: aksClusterType,
 			},
 			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/certificates.k8s.io/certificatesigningrequests/write"}, IsDataAction: true}},
-		},
-
-		{
-			"podsEphemeralContainersHasNoPublishedAction",
-			args{
-				isWildcardTest: false,
-				subRevReq: &authzv1.SubjectAccessReviewSpec{
-					ResourceAttributes: &authzv1.ResourceAttributes{Group: "", Resource: "pods", Subresource: "ephemeralcontainers", Version: "v1", Name: "test", Verb: "update"},
-				}, clusterType: aksClusterType,
-			},
-			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/pods/write"}, IsDataAction: true}},
 		},
 
 		{
