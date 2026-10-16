@@ -1960,3 +1960,45 @@ func Test_buildCheckAccessV2URL(t *testing.T) {
 		})
 	}
 }
+
+// Test_ConvertCheckAccessResponse_DenyAssignmentIsSystemProtected is a
+// regression test for a bug where guard returned HTTP 500 ("an error on the
+// server (\"unknown\")") instead of a decision whenever the Azure PDP response
+// contained a denyAssignment. The PDP emits denyAssignment.isSystemProtected as
+// a JSON boolean, but AzureDenyAssignment.IsSystemProtected was typed string,
+// so json.Unmarshal failed with:
+//
+//	json: cannot unmarshal bool into Go struct field
+//	  .0.denyAssignment.isSystemProtected of type string
+//
+// which ConvertCheckAccessResponse surfaced as a 500. This test feeds a
+// representative deny response (isSystemProtected: true) and asserts it
+// unmarshals cleanly and yields a proper deny verdict.
+func Test_ConvertCheckAccessResponse_DenyAssignmentIsSystemProtected(t *testing.T) {
+	body := []byte(`[
+		{
+			"accessDecision": "NotAllowed",
+			"actionId": "Microsoft.ContainerService/managedClusters/apps/deployments/write",
+			"isDataAction": true,
+			"roleAssignment": null,
+			"denyAssignment": {
+				"metadata": null,
+				"isSystemProtected": true,
+				"isBuiltIn": false,
+				"id": "/subscriptions/sub/resourceGroups/AIM_rg/providers/Microsoft.Authorization/denyAssignments/c8964e52",
+				"name": "c8964e52",
+				"description": "Deny assignment for AIManager managed resource group.",
+				"scope": "/subscriptions/sub/resourceGroups/AIM_rg",
+				"doNotApplyToChildScopes": false
+			},
+			"timeToLiveInMs": 300000
+		}
+	]`)
+
+	status, err := ConvertCheckAccessResponse(context.Background(), "minsha@microsoft.com", body)
+	assert.NoError(t, err, "boolean isSystemProtected must not cause an unmarshal error / 500")
+	assert.NotNil(t, status)
+	assert.False(t, status.Allowed, "a NotAllowed decision must be denied")
+	assert.True(t, status.Denied)
+	assert.Equal(t, AccessNotAllowedVerdict, status.Reason)
+}
