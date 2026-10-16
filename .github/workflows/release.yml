@@ -4,6 +4,8 @@ on:
   push:
     tags:
       - "*.*"
+  pull_request:
+    types: [closed]
   workflow_dispatch:
 
 concurrency:
@@ -23,33 +25,78 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
-      # `make release` needs version_strategy=tag, which the Makefile derives
-      # from `git describe --exact-match --tags`. Fail fast with a clear message
-      # instead of the opaque make error when HEAD carries no tag.
-      - name: Validate release tag
+      # Decide whether to release and which tag to use.
+      # - tag push / manual dispatch: reuse the tag already at HEAD.
+      # - PR merged into master that changed go.mod:
+      #   auto-increment the patch of the latest tag and create it locally so
+      #   `make release` sees version_strategy=tag. The tag ref is published
+      #   later by the release action (via GITHUB_TOKEN), which does not
+      #   re-trigger the tag-push flow.
+      - name: Determine release context
+        id: ctx
         run: |
           set -euo pipefail
-          tag=$(git describe --exact-match --tags --abbrev=0 2>/dev/null || true)
-          if [ -z "$tag" ]; then
-            echo "::error::HEAD has no tag reachable via 'git describe --exact-match --tags'. make release needs version_strategy=tag." >&2
-            exit 1
+          should_release=false
+          tag=""
+
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            merged="${{ github.event.pull_request.merged }}"
+            base_ref="${{ github.event.pull_request.base.ref }}"
+            base_sha="${{ github.event.pull_request.base.sha }}"
+            head_sha="${{ github.event.pull_request.head.sha }}"
+            gomod_changed=false
+            if git diff --name-only "$base_sha" "$head_sha" | grep -qxF 'go.mod'; then
+              gomod_changed=true
+            fi
+            if [ "$merged" = "true" ] && [ "$base_ref" = "master" ] && [ "$gomod_changed" = "true" ]; then
+              latest=$(git describe --tags --abbrev=0)
+              prefix="$(printf '%s' "$latest" | sed -E 's/[0-9]+\.[0-9]+\.[0-9]+.*$//')"
+              core="${latest#"$prefix"}"
+              major="$(printf '%s' "$core" | cut -d. -f1)"
+              minor="$(printf '%s' "$core" | cut -d. -f2)"
+              patch="$(printf '%s' "$core" | cut -d. -f3 | sed -E 's/[^0-9].*$//')"
+              if ! printf '%s' "$major$minor$patch" | grep -qE '^[0-9]+$'; then
+                echo "Cannot parse latest tag '$latest' as MAJOR.MINOR.PATCH" >&2
+                exit 1
+              fi
+              tag="${prefix}${major}.${minor}.$((patch + 1))"
+              # Create the release tag locally so `make release` can derive the
+              # tag-based version before the release action publishes the ref.
+              git config user.name "github-actions[bot]"
+              git config user.email "github-actions[bot]@users.noreply.github.com"
+              git tag -a "$tag" -m "Release $tag"
+              should_release=true
+              echo "go.mod bump PR merged; new release tag: $tag (from $latest)"
+            else
+              echo "PR does not qualify for release (merged=$merged base=$base_ref go.mod changed=$gomod_changed)."
+            fi
+          else
+            tag=$(git describe --exact-match --tags --abbrev=0)
+            should_release=true
+            echo "Tag/dispatch release: $tag"
           fi
-          echo "Releasing tag: $tag"
+
+          echo "should_release=$should_release" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
       - name: Print version info
         id: semver
+        if: steps.ctx.outputs.should_release == 'true'
         run: |
           make version
 
       - name: Set up QEMU
+        if: steps.ctx.outputs.should_release == 'true'
         uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
         with:
           cache-image: false
 
       - name: Set up Docker Buildx
+        if: steps.ctx.outputs.should_release == 'true'
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
       - name: Log in to the Container registry
+        if: steps.ctx.outputs.should_release == 'true'
         uses: docker/login-action@465a07811f14bebb1938fbed4728c6a1ff8901fc # v2.2.0
         with:
           registry: ghcr.io
@@ -57,23 +104,18 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Publish to GitHub Container Registry
+        if: steps.ctx.outputs.should_release == 'true'
         env:
           REGISTRY: ghcr.io/Azure
           APPSCODE_ENV: prod
         run: |
           make release COMPRESS=yes
 
-      - name: Determine tag
-        id: tag
-        run: |
-          TAG=$(git describe --exact-match --tags --abbrev=0 2>/dev/null || echo "")
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-
       - name: Release
         uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
-        if: steps.tag.outputs.tag != ''
+        if: steps.ctx.outputs.should_release == 'true' && steps.ctx.outputs.tag != ''
         with:
-          tag_name: ${{ steps.tag.outputs.tag }}
+          tag_name: ${{ steps.ctx.outputs.tag }}
           generate_release_notes: true
           files: |
             bin/guard-darwin-amd64.tar.gz
