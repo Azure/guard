@@ -1504,6 +1504,13 @@ const (
 	cacheKeyTestGroup = "apps"
 )
 
+const (
+	cacheKeyTestOID            = "4b0c5f3e-2a71-4d9b-8e16-7f3a9c2d5e81"
+	cacheKeyTestOtherOID       = "9d2e7a14-6b3f-4c85-a0d9-1e5b8f4c3a27"
+	cacheKeyTestSecurityGroupA = "1f6a2b9c-3d4e-4f50-8a61-b7c8d9e0f123"
+	cacheKeyTestSecurityGroupB = "7e5d4c3b-2a19-4087-9f6e-5d4c3b2a1908"
+)
+
 // cacheKeyDigestPattern matches the hashed portion of a cache key.
 var cacheKeyDigestPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
@@ -1545,7 +1552,7 @@ func cacheKeyDistinctCases() []cacheKeyCase {
 		}
 	}
 
-	return []cacheKeyCase{
+	return append([]cacheKeyCase{
 		resourceCase("empty namespace", cacheKeyTestUser, "", cacheKeyTestGroup),
 		resourceCase("namespace equal to the former empty placeholder", cacheKeyTestUser, "-", cacheKeyTestGroup),
 		resourceCase("empty group", cacheKeyTestUser, "dev", ""),
@@ -1596,7 +1603,46 @@ func cacheKeyDistinctCases() []cacheKeyCase {
 			name:      "neither resource nor non-resource attributes",
 			subRevReq: &authzv1.SubjectAccessReviewSpec{User: cacheKeyTestUser},
 		},
+	}, cacheKeyIdentityCases()...)
+}
+
+// cacheKeyIdentityCases returns one user's requests whose CheckAccess subjects differ.
+func cacheKeyIdentityCases() []cacheKeyCase {
+	shapes := []struct {
+		name string
+		spec authzv1.SubjectAccessReviewSpec
+	}{
+		{"resource request", authzv1.SubjectAccessReviewSpec{ResourceAttributes: &authzv1.ResourceAttributes{
+			Namespace: "shape", Group: cacheKeyTestGroup, Resource: "deployments", Verb: "get",
+		}}},
+		{"non-resource request", authzv1.SubjectAccessReviewSpec{
+			NonResourceAttributes: &authzv1.NonResourceAttributes{Path: "/healthz", Verb: "get"},
+		}},
+		{"request without attributes", authzv1.SubjectAccessReviewSpec{}},
 	}
+
+	var cases []cacheKeyCase
+	for _, shape := range shapes {
+		identityCase := func(variant, uid string, oids, groups []string) cacheKeyCase {
+			spec := shape.spec
+			spec.User, spec.UID, spec.Groups = cacheKeyTestUser, uid, groups
+			spec.Extra = map[string]authzv1.ExtraValue{"oid": oids}
+			return cacheKeyCase{name: shape.name + " with " + variant, subRevReq: &spec}
+		}
+		cases = append(
+			cases,
+			identityCase("an oid", "", []string{cacheKeyTestOID}, nil),
+			identityCase("another oid", "", []string{cacheKeyTestOtherOID}, nil),
+			identityCase("two oids", "", []string{cacheKeyTestOID, cacheKeyTestOtherOID}, nil),
+			identityCase("an empty value before the oid", "", []string{"", cacheKeyTestOID}, nil),
+			identityCase("an oid and a valid group", "", []string{cacheKeyTestOID}, []string{cacheKeyTestSecurityGroupA}),
+			identityCase("an oid and two valid groups", "", []string{cacheKeyTestOID},
+				[]string{cacheKeyTestSecurityGroupA, cacheKeyTestSecurityGroupB}),
+			identityCase("an oid and a UID", "uid-1", []string{cacheKeyTestOID}, nil),
+			identityCase("the oid moved into the groups", "", nil, []string{cacheKeyTestOID}),
+		)
+	}
+	return cases
 }
 
 // Test_getResultCacheKey_distinctRequestsGetDistinctKeys asserts that requests
@@ -1687,6 +1733,31 @@ func Test_getResultCacheKey_readVerbsShareCacheKey(t *testing.T) {
 					allowSubresourceTypeCheck, want)
 			}
 		}
+	}
+}
+
+// Test_getResultCacheKey_groupsKeyedAsSentToCheckAccess asserts the key sees valid groups as a set.
+func Test_getResultCacheKey_groupsKeyedAsSentToCheckAccess(t *testing.T) {
+	request := func(groups ...string) *authzv1.SubjectAccessReviewSpec {
+		return &authzv1.SubjectAccessReviewSpec{
+			User:               cacheKeyTestUser,
+			Groups:             groups,
+			Extra:              map[string]authzv1.ExtraValue{"oid": {cacheKeyTestOID}},
+			ResourceAttributes: &authzv1.ResourceAttributes{Namespace: "dev", Resource: "pods", Verb: "get"},
+		}
+	}
+	want := getResultCacheKey(request(cacheKeyTestSecurityGroupA, cacheKeyTestSecurityGroupB), false)
+
+	reordered := request(cacheKeyTestSecurityGroupB, cacheKeyTestSecurityGroupA)
+	if got := getResultCacheKey(reordered, false); got != want {
+		t.Errorf("groups in another order: key = %q, want %q", got, want)
+	}
+	withNonUUID := request(cacheKeyTestSecurityGroupA, "system:authenticated", cacheKeyTestSecurityGroupB)
+	if got := getResultCacheKey(withNonUUID, false); got != want {
+		t.Errorf("added non-UUID group: key = %q, want %q", got, want)
+	}
+	if original := []string{cacheKeyTestSecurityGroupB, cacheKeyTestSecurityGroupA}; !reflect.DeepEqual(reordered.Groups, original) {
+		t.Errorf("getResultCacheKey() changed the request's Groups to %v, want %v", reordered.Groups, original)
 	}
 }
 
