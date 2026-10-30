@@ -18,9 +18,12 @@ package azure
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -201,4 +204,183 @@ func TestCheck(t *testing.T) {
 			assert.Equal(t, v.Code(), http.StatusInternalServerError)
 		}
 	})
+}
+
+const (
+	subjectTestClusterID = "/subscriptions/s/resourceGroups/rg/providers/Microsoft.ContainerService/managedClusters/c"
+	subjectTestUser      = "alice@contoso.com"
+	userObjectID         = "5a1d3c7e-0b2f-4e68-9d14-3c6b8a2f7e01"
+	userGroupID          = "8c4e2a6d-1f3b-4a57-b9e0-6d2c4f8a1b35"
+	secondUserGroupID    = "0d9f5b3a-6e1c-4f27-8a43-b2e7c5d1f964"
+	allowedObjectID      = "2e7b9d1c-4a6f-4c38-8b05-9f1e3d7c5a62"
+	allowedGroupID       = "6f3a1e9b-7c2d-4e84-a6b1-0c5d9e3f7a28"
+)
+
+// checkAccessStub allows allowedObjectID and allowedGroupID members and records each subject.
+type checkAccessStub struct {
+	mu       sync.Mutex
+	subjects []rbac.SubjectInfoAttributes
+}
+
+func (s *checkAccessStub) checkAccess(w http.ResponseWriter, r *http.Request) {
+	var req rbac.CheckAccessRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	subject := req.Subject.Attributes
+	s.mu.Lock()
+	s.subjects = append(s.subjects, subject)
+	s.mu.Unlock()
+
+	decision := "NotAllowed"
+	if subject.ObjectId == allowedObjectID || slices.Contains(subject.Groups, allowedGroupID) {
+		decision = "Allowed"
+	}
+	decisions := make([]rbac.AuthorizationDecision, 0, len(req.Actions))
+	for _, action := range req.Actions {
+		decisions = append(decisions, rbac.AuthorizationDecision{Decision: decision, ActionId: action.Id, IsDataAction: true})
+	}
+	_ = json.NewEncoder(w).Encode(decisions)
+}
+
+func (s *checkAccessStub) recorded() []rbac.SubjectInfoAttributes {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.subjects)
+}
+
+type subjectHarness struct {
+	stub       *checkAccessStub
+	authorizer *Authorizer
+	store      authz.Store
+}
+
+func newSubjectHarness(t *testing.T) *subjectHarness {
+	t.Helper()
+	stub := &checkAccessStub{}
+	router := chi.NewRouter()
+	router.Post("/login/*", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"token_type":"Bearer","expires_on":4102444800,"access_token":"t"}`))
+	})
+	router.Post("/arm/*", stub.checkAccess)
+	srv := httptest.NewTLSServer(router)
+	t.Cleanup(srv.Close)
+
+	opts := authzOpts.Options{
+		AuthzMode:        authzOpts.AKSAuthzMode,
+		ResourceId:       subjectTestClusterID,
+		AKSAuthzTokenURL: srv.URL + "/login/token",
+	}
+	authzInfo := rbac.AuthzInfo{AADEndpoint: srv.URL + "/login/", ARMEndPoint: srv.URL + "/arm/"}
+	rbacClient, err := rbac.New(opts, auth.Options{TenantID: "tenant_id", HttpClientRetryCount: httpClientRetryCount}, &authzInfo)
+	if err != nil {
+		t.Fatalf("rbac.New() error = %v", err)
+	}
+	store, err := data.NewDataStore(data.NewOptions())
+	if err != nil {
+		t.Fatalf("data.NewDataStore() error = %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	return &subjectHarness{stub: stub, authorizer: &Authorizer{rbacClient: rbacClient}, store: store}
+}
+
+// check runs Check and returns its verdict and the subjects it sent to CheckAccess.
+func (h *subjectHarness) check(t *testing.T, request *authzv1.SubjectAccessReviewSpec) (bool, []rbac.SubjectInfoAttributes) {
+	t.Helper()
+	before := len(h.stub.recorded())
+	resp, err := h.authorizer.Check(context.Background(), request, h.store)
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+	return resp.Allowed, h.stub.recorded()[before:]
+}
+
+func subjectRequest(objectID string, groups []string, attr authzv1.ResourceAttributes) *authzv1.SubjectAccessReviewSpec {
+	return &authzv1.SubjectAccessReviewSpec{
+		User:               subjectTestUser,
+		Groups:             append([]string{"system:authenticated"}, groups...),
+		Extra:              map[string]authzv1.ExtraValue{"oid": {objectID}},
+		ResourceAttributes: &attr,
+	}
+}
+
+type subjectStep struct {
+	objectID string
+	groups   []string
+	allowed  bool
+}
+
+// runSubjectSteps runs steps on one harness; each must reach CheckAccess once, for its own subject.
+func runSubjectSteps(t *testing.T, attr authzv1.ResourceAttributes, steps ...subjectStep) {
+	t.Helper()
+	h := newSubjectHarness(t)
+	for i, s := range steps {
+		allowed, asked := h.check(t, subjectRequest(s.objectID, s.groups, attr))
+		assert.Equalf(t, s.allowed, allowed, "request %d verdict", i+1)
+		assert.Equalf(t, []rbac.SubjectInfoAttributes{{ObjectId: s.objectID, Groups: s.groups}}, asked,
+			"request %d CheckAccess subjects", i+1)
+	}
+}
+
+// TestCheck_cachedDecisionIsScopedToSubject asserts a verdict is never reused for another subject.
+func TestCheck_cachedDecisionIsScopedToSubject(t *testing.T) {
+	requests := []struct {
+		name string
+		attr authzv1.ResourceAttributes
+	}{
+		{"get configmaps", authzv1.ResourceAttributes{Namespace: "default", Resource: "configmaps", Verb: "get"}},
+		{"create clusterrolebindings", authzv1.ResourceAttributes{
+			Group: "rbac.authorization.k8s.io", Resource: "clusterrolebindings", Verb: "create",
+		}},
+		{"escalate clusterroles", authzv1.ResourceAttributes{
+			Group: "rbac.authorization.k8s.io", Resource: "clusterroles", Verb: "escalate",
+		}},
+	}
+	own := []string{userGroupID}
+	ownAndAllowed := []string{userGroupID, allowedGroupID}
+	scenarios := []struct {
+		name          string
+		first, second subjectStep
+	}{
+		{"allowed object id, then own object id", subjectStep{allowedObjectID, own, true}, subjectStep{userObjectID, own, false}},
+		{"allowed group added, then own groups", subjectStep{userObjectID, ownAndAllowed, true}, subjectStep{userObjectID, own, false}},
+		{"denied object id, then allowed object id", subjectStep{userObjectID, own, false}, subjectStep{allowedObjectID, own, true}},
+	}
+
+	for _, req := range requests {
+		for _, sc := range scenarios {
+			t.Run(req.name+"/"+sc.name, func(t *testing.T) {
+				runSubjectSteps(t, req.attr, sc.first, sc.second)
+			})
+		}
+	}
+}
+
+// TestCheck_cachedDecisionIsReusedForSameSubject asserts a repeated subject is served from cache.
+func TestCheck_cachedDecisionIsReusedForSameSubject(t *testing.T) {
+	attr := authzv1.ResourceAttributes{Namespace: "default", Resource: "configmaps", Verb: "get"}
+	groups := []string{userGroupID, secondUserGroupID}
+	reordered := []string{secondUserGroupID, userGroupID}
+
+	for _, tc := range []struct {
+		name     string
+		objectID string
+		allowed  bool
+	}{
+		{"allowed", allowedObjectID, true},
+		{"denied", userObjectID, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newSubjectHarness(t)
+			firstAllowed, firstAsked := h.check(t, subjectRequest(tc.objectID, groups, attr))
+			assert.Equal(t, tc.allowed, firstAllowed)
+			assert.Len(t, firstAsked, 1)
+			for _, g := range [][]string{groups, reordered} {
+				allowed, asked := h.check(t, subjectRequest(tc.objectID, g, attr))
+				assert.Equalf(t, tc.allowed, allowed, "groups %v verdict", g)
+				assert.Emptyf(t, asked, "groups %v must be served from the cache", g)
+			}
+		})
+	}
 }
