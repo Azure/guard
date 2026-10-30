@@ -1629,7 +1629,8 @@ func cacheKeyIdentityCases() []cacheKeyCase {
 			spec.Extra = map[string]authzv1.ExtraValue{"oid": oids}
 			return cacheKeyCase{name: shape.name + " with " + variant, subRevReq: &spec}
 		}
-		cases = append(cases,
+		cases = append(
+			cases,
 			identityCase("an oid", "", []string{cacheKeyTestOID}, nil),
 			identityCase("another oid", "", []string{cacheKeyTestOtherOID}, nil),
 			identityCase("two oids", "", []string{cacheKeyTestOID, cacheKeyTestOtherOID}, nil),
