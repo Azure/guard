@@ -172,9 +172,10 @@ guard run \
 
 ## DataAction Mapping
 
-Guard turns each `SubjectAccessReview` into one or more Azure DataAction strings. The
-functions `getResourceAndAction` and `getDataActions` in `rbac/checkaccessreqhelper.go`
-compose these strings.
+Guard turns each `SubjectAccessReview` into one or more Azure DataAction strings, and
+CheckAccess allows the request only when every string is allowed. The functions
+`getResourceAndAction`, `getResourceActions` and `getDataActions` in
+`rbac/checkaccessreqhelper.go` compose these strings.
 
 Guard does not own the action namespace. Azure RBAC can evaluate an action only if the
 resource provider already publishes it. If Guard sends an action that the provider does
@@ -186,9 +187,9 @@ not publish, the result is a denial that the customer cannot correct.
 flowchart TD
     A[SubjectAccessReview] --> B{User starts with 'system:'?}
     B -->|Yes| C[NoOpinion. Azure RBAC is skipped.<br/>Standard AKS nodes stop here.]
-    B -->|No| D[getResourceAndAction]
-    D --> E[DataAction string]
-    E --> F{Operation published by the RP?}
+    B -->|No| D[getResourceActions]
+    D --> E[One or more DataAction strings.<br/>All must be allowed.]
+    E --> F{Each operation published by the RP?}
     F -->|Yes| G[Role can grant it.<br/>Allow or deny by assignment.]
     F -->|No| H["Only a covering wildcard matches.<br/>Writer where it has resource/*,<br/>otherwise Admin and Cluster Admin."]
     H --> I[Denied for Reader and<br/>for every custom role]
@@ -229,30 +230,39 @@ If the operation is absent:
   unregistered action, but `Writer` matches one whenever the parent resource is among
   its 24 wildcards.
 
-Status of the actions used by the mapping, measured on 2026-09-25:
+Status of the actions used by the mapping. The "Measured" column records when each row
+was last checked; rows dated 2026-10-14 or later were sampled over 24 spaced polls with
+`pods/exec/action`, `certificatesigningrequests/nodeclient/action` and
+`certificatesigningrequests/selfnodeclient/action` asserted as controls on every poll.
 
-| Action                                                                                | Registered |
-| ------------------------------------------------------------------------------------- | ---------- |
-| `managedClusters/pods/{read,write,delete}`                                             | Yes        |
-| `managedClusters/pods/exec/action`                                                     | Yes        |
-| `managedClusters/certificates.k8s.io/certificatesigningrequests/{read,write,delete}`   | Yes        |
-| `managedClusters/certificates.k8s.io/certificatesigningrequests/nodeclient/action`     | Yes        |
-| `managedClusters/pods/{attach,portforward,proxy}/action`                               | No         |
-| `managedClusters/services/proxy/action`                                                | No         |
-| `managedClusters/nodes/proxy/action`                                                   | No         |
-| `managedClusters/serviceaccounts/token/action`                                         | No         |
+| Action                                                                                | Registered | Measured   |
+| ------------------------------------------------------------------------------------- | ---------- | ---------- |
+| `managedClusters/pods/{read,write,delete}`                                             | Yes        | 2026-09-25 |
+| `managedClusters/pods/exec/action`                                                     | Yes        | 2026-10-31 |
+| `managedClusters/serviceaccounts/impersonate/action`                                   | Yes        | 2026-10-14 |
+| `managedClusters/certificates.k8s.io/certificatesigningrequests/{read,write,delete}`   | Yes        | 2026-09-25 |
+| `managedClusters/certificates.k8s.io/certificatesigningrequests/nodeclient/action`     | Yes        | 2026-10-14 |
+| `managedClusters/pods/{attach,portforward,proxy}/action`                               | No         | 2026-09-25 |
+| `managedClusters/services/proxy/action`                                                | No         | 2026-09-25 |
+| `managedClusters/nodes/proxy/action`                                                   | No         | 2026-09-25 |
+| `managedClusters/serviceaccounts/token/action`                                         | No         | 2026-10-14 |
+| `managedClusters/pods/ephemeralcontainers/action`                                      | No         | 2026-10-31 |
 
 `nodeclient/action` was unregistered when this section was first measured on
 2026-08-18 and has since been published. Re-run the `az` check rather than trusting
 this table; it records a measurement, not a guarantee.
 
-Which built-in role still matches each unregistered action:
+`serviceaccounts/token/action` and `pods/ephemeralcontainers/action` are both still
+unregistered, and guard emits neither. `serviceaccounts/token` maps onto
+`serviceaccounts/impersonate/action`. A write to `pods/ephemeralcontainers` needs both
+`pods/write` and `pods/exec/action`. All three of those actions are registered.
+
+Which built-in role still matches each unregistered action guard emits:
 
 | Unregistered action                                    | `Reader` | `Writer`                     | `Admin` / `Cluster Admin` |
 | ------------------------------------------------------ | -------- | ---------------------------- | ------------------------- |
 | `pods/{attach,portforward,proxy}/action`               | No       | Yes, via `pods/*`             | Yes                       |
 | `services/proxy/action`                                | No       | Yes, via `services/*`         | Yes                       |
-| `serviceaccounts/token/action`                         | No       | Yes, via `serviceaccounts/*`  | Yes                       |
 | `nodes/proxy/action`                                   | No       | No                            | Yes                       |
 
 `Writer` carries no `nodes/*` entry, so that action is reachable only by widening to
@@ -296,10 +306,14 @@ flowchart TD
 
     subgraph M1["Mechanism A: DataAction Id"]
         direction TB
-        C1[getResourceAndAction] --> C2[collapsesIntoParent]
+        C1[getResourceAndAction] --> C0{equivalentPublishedActions}
+        C0 -->|mapped| C0a["Id becomes<br/>resource/equivalent/action<br/>target MUST be registered"]
+        C0 -->|not mapped| C2[collapsesIntoParent]
         C2 --> C2a["safeSubresources<br/>+ unregisteredSubresources"]
         C2a --> C3["Collapsed: Id becomes<br/>resource/verb"]
         C2 --> C4["Otherwise: Id becomes<br/>resource/subresource/action<br/>MUST be registered by the RP"]
+        C0a & C3 & C4 --> C5{"Write listed in<br/>additionalWriteActions?"}
+        C5 -->|yes| C6["A second Id is added:<br/>resource/extra/action<br/>MUST be registered.<br/>Both must be allowed."]
     end
 
     subgraph M2["Mechanism B: Subresource attribute"]
@@ -309,20 +323,22 @@ flowchart TD
     end
 
     style C3 fill:#d4f5d4,stroke:#2a7,color:#000
+    style C0a fill:#d4f5d4,stroke:#2a7,color:#000
+    style C6 fill:#d4f5d4,stroke:#2a7,color:#000
     style C4 fill:#ffd6cc,stroke:#a33,color:#000
     style D3 fill:#d4f5d4,stroke:#2a7,color:#000
 ```
 
 | Mechanism                        | Code                               | Controlled by                                                              | Effect                                                                                      |
 | -------------------------------- | ---------------------------------- | -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| A. DataAction Id                 | `getResourceAndAction`             | `safeSubresources` and `unregisteredSubresources`                          | A subresource on neither list stays in the action string. The operation must exist in the registry. |
+| A. DataAction Id                 | `getResourceAndAction`, `getResourceActions` | `equivalentPublishedActions`, `safeSubresources`, `unregisteredSubresources` and `additionalWriteActions` | A subresource on none of the first three tables stays in the action string. `additionalWriteActions` adds a second action to some writes. Every action must exist in the registry. |
 | B. Subresource attribute         | `setAuthInfoSubresourceAttributes` | `subresourceAttributeAllowlist` and `--azure.allow-subresource-type-check` | The subresource is sent next to the action as an attribute. The action string is unchanged. |
 
 Only mechanism A is subject to the registry invariant.
 
-Mechanism A lists what collapses rather than what stays distinct, so a subresource
-nobody has classified keeps its own action instead of inheriting the parent's
-permission. Two lists collapse a subresource into `<resource>/<verb>`:
+Mechanism A lists what collapses or redirects rather than what stays distinct, so a
+subresource nobody has classified keeps its own action instead of inheriting the
+parent's permission. Two lists collapse a subresource into `<resource>/<verb>`:
 
 - `safeSubresources` - upstream's read-only `view` ClusterRole grants these alongside
   the parent (`status`, `scale`, `pods/log`), so the parent's permission already
@@ -335,6 +351,33 @@ permission. Two lists collapse a subresource into `<resource>/<verb>`:
 The second list is the registry invariant applied to this mapping, not a judgement
 about how sensitive the subresource is. Verify with the `az` check above before moving
 an entry out of it.
+
+A third table redirects instead of collapsing:
+
+- `equivalentPublishedActions` - the subresource is privileged enough that collapsing
+  into the parent would hide it, but its own action is unpublished, so emitting that
+  would deny the operation outright. Where the provider publishes a different action
+  of equivalent authority, the pair maps onto it: `serviceaccounts/token` onto
+  `serviceaccounts/impersonate/action`. Unlike the other two, this table is keyed by
+  resource *and* subresource, so a same-named subresource on another resource is
+  unaffected. It is consulted before the collapse check, and the target must be
+  registered - verify with the `az` check before adding an entry.
+
+A fourth table adds an action instead of replacing one:
+
+- `additionalWriteActions` - a create, update or patch on the pair needs a second
+  published action on top of the one resolved above. `pods/ephemeralcontainers`
+  (`kubectl debug`) collapses into `pods/write` like any unregistered subresource, and
+  a write to it also needs `pods/exec/action`, because the new container runs inside
+  the live Pod. A read stays a single `pods/read`. This table is also keyed by
+  resource and subresource, and the added action must be registered.
+
+Requiring both actions never allows a request that `pods/write` alone denied. A
+condition on a `pods/write` assignment still applies to `kubectl debug`, and an
+exec-only role does not gain ephemeral containers, which choose their own image and
+`securityContext`. A role that grants `pods/write` without `pods/exec/action` can no
+longer run `kubectl debug`. With `--azure.allow-subresource-type-check`, both actions
+carry the `subresource` attribute, which mechanism B sends alongside the action.
 
 ## Custom Resource Definition (CRD) Support
 

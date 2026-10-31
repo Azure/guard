@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -34,6 +35,7 @@ import (
 	"go.kubeguard.dev/guard/util/httpclient"
 	"go.kubeguard.dev/guard/util/httpclient/httpclienttesting"
 
+	checkaccess "github.com/Azure/checkaccess-v2-go-sdk/client"
 	"github.com/stretchr/testify/assert"
 	authzv1 "k8s.io/api/authorization/v1"
 	"k8s.io/klog/v2"
@@ -853,6 +855,106 @@ func TestCheckAccess_ClusterScoped(t *testing.T) {
 			})
 		}
 	})
+}
+
+const (
+	grantingTestResourceID = "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.ContainerService/managedClusters/cluster"
+	podsWriteDataAction    = managedClusters + "/pods/write"
+	podsExecDataAction     = managedClusters + "/pods/exec/action"
+	patchVerb              = "patch"
+)
+
+// grantedDecision answers like a role that grants exactly the listed actions.
+func grantedDecision(actionID string, granted []string) checkaccess.AccessDecision {
+	if slices.Contains(granted, actionID) {
+		return checkaccess.Allowed
+	}
+	return checkaccess.NotAllowed
+}
+
+func newGrantingV1AccessInfo(t *testing.T, granted []string) *AccessInfo {
+	t.Helper()
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req CheckAccessRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		decisions := make([]AuthorizationDecision, 0, len(req.Actions))
+		for _, action := range req.Actions {
+			decision := string(grantedDecision(action.Id, granted))
+			decisions = append(decisions, AuthorizationDecision{Decision: decision, ActionId: action.Id, IsDataAction: action.IsDataAction})
+		}
+		_ = json.NewEncoder(w).Encode(decisions)
+	}))
+	t.Cleanup(ts.Close)
+
+	apiURL, err := url.Parse(ts.URL)
+	if err != nil {
+		t.Fatalf("parse test server URL: %v", err)
+	}
+	return &AccessInfo{
+		client:          httpclient.DefaultHTTPClient,
+		apiURL:          apiURL,
+		headers:         http.Header{},
+		clusterType:     managedClusters,
+		azureResourceId: grantingTestResourceID,
+	}
+}
+
+func newGrantingV2AccessInfo(granted []string) *AccessInfo {
+	pdp := &mockPDPClient{checkAccessFunc: func(_ context.Context, req checkaccess.AuthorizationRequest) (*checkaccess.AuthorizationDecisionResponse, error) {
+		decisions := make([]checkaccess.AuthorizationDecision, 0, len(req.Actions))
+		for _, action := range req.Actions {
+			decisions = append(decisions, checkaccess.AuthorizationDecision{ActionId: action.Id, AccessDecision: grantedDecision(action.Id, granted)})
+		}
+		return &checkaccess.AuthorizationDecisionResponse{Value: decisions}, nil
+	}}
+	return &AccessInfo{
+		pdpClient:        pdp,
+		useCheckAccessV2: true,
+		clusterType:      managedClusters,
+		azureResourceId:  grantingTestResourceID,
+	}
+}
+
+func assertPodPatchDecision(t *testing.T, info *AccessInfo, subresource string, wantAllowed bool) {
+	t.Helper()
+	request := &authzv1.SubjectAccessReviewSpec{
+		User:  "alpha@bing.com",
+		Extra: map[string]authzv1.ExtraValue{"oid": {"00000000-0000-0000-0000-000000000000"}},
+		ResourceAttributes: &authzv1.ResourceAttributes{
+			Namespace: "dev", Resource: "pods", Subresource: subresource, Version: "v1", Name: "test", Verb: patchVerb,
+		},
+	}
+	status, err := info.CheckAccess(context.Background(), request)
+	if !assert.NoError(t, err) {
+		return
+	}
+	assert.Equal(t, wantAllowed, status.Allowed)
+	assert.Equal(t, !wantAllowed, status.Denied)
+}
+
+func TestCheckAccess_ephemeralContainerWriteNeedsWriteAndExec(t *testing.T) {
+	cases := []struct {
+		name        string
+		subresource string
+		granted     []string
+		wantAllowed bool
+	}{
+		{"write only", EphemeralContainersSubresource, []string{podsWriteDataAction}, false},
+		{"exec only", EphemeralContainersSubresource, []string{podsExecDataAction}, false},
+		{"write and exec", EphemeralContainersSubresource, []string{podsWriteDataAction, podsExecDataAction}, true},
+		{"pod patch with write only", "", []string{podsWriteDataAction}, true},
+	}
+	for _, tc := range cases {
+		t.Run("v1/"+tc.name, func(t *testing.T) {
+			assertPodPatchDecision(t, newGrantingV1AccessInfo(t, tc.granted), tc.subresource, tc.wantAllowed)
+		})
+		t.Run("v2/"+tc.name, func(t *testing.T) {
+			assertPodPatchDecision(t, newGrantingV2AccessInfo(tc.granted), tc.subresource, tc.wantAllowed)
+		})
+	}
 }
 
 func getAuthServerAndAccessInfo(returnCode int, body, clientID, clientSecret string) (*httptest.Server, *AccessInfo) {

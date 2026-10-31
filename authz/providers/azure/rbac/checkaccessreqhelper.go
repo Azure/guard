@@ -39,29 +39,34 @@ import (
 )
 
 const (
-	ActionBatchCount            = 200
-	AccessAllowedVerdict        = "Access allowed by Azure RBAC"
-	AccessAllowedVerboseVerdict = "Access allowed by Azure RBAC Role Assignment %s of Role %s to user %s"
-	Allowed                     = "allowed"
-	AccessNotAllowedVerdict     = "User does not have access to the resource in Azure. Update role assignment to allow access."
-	NamespaceResourceFormat     = "/providers/Microsoft.KubernetesConfiguration/namespaces"
-	namespaces                  = "namespaces"
-	managedNamespaces           = "managedNamespaces"
-	NoOpinionVerdict            = "Azure does not have opinion for this user."
-	NonAADUserNoOpVerdict       = "Azure does not have opinion for this non AAD user. If you are an AAD user, please set Extra:oid parameter for impersonated user in the kubeconfig"
-	NonAADUserNotAllowedVerdict = "Access denied by Azure RBAC for non AAD users. Configure --azure.skip-authz-for-non-aad-users to enable access. If you are an AAD user, please set Extra:oid parameter for impersonated user in the kubeconfig."
-	CheckAccessErrorVerdict     = "Access denied due to Azure RBAC check failure. Please retry later."
-	PodsResource                = "pods"
-	CustomResources             = "customresources"
-	StatusSubresource           = "status"
-	ScaleSubresource            = "scale"
-	LogSubresource              = "log"
-	LogsSubresource             = "logs"
-	actionSuffix                = "action"
-	wildcardValue               = "*"
-	ReadVerb                    = "read"
-	WriteVerb                   = "write"
-	DeleteVerb                  = "delete"
+	ActionBatchCount               = 200
+	AccessAllowedVerdict           = "Access allowed by Azure RBAC"
+	AccessAllowedVerboseVerdict    = "Access allowed by Azure RBAC Role Assignment %s of Role %s to user %s"
+	Allowed                        = "allowed"
+	AccessNotAllowedVerdict        = "User does not have access to the resource in Azure. Update role assignment to allow access."
+	NamespaceResourceFormat        = "/providers/Microsoft.KubernetesConfiguration/namespaces"
+	namespaces                     = "namespaces"
+	managedNamespaces              = "managedNamespaces"
+	NoOpinionVerdict               = "Azure does not have opinion for this user."
+	NonAADUserNoOpVerdict          = "Azure does not have opinion for this non AAD user. If you are an AAD user, please set Extra:oid parameter for impersonated user in the kubeconfig"
+	NonAADUserNotAllowedVerdict    = "Access denied by Azure RBAC for non AAD users. Configure --azure.skip-authz-for-non-aad-users to enable access. If you are an AAD user, please set Extra:oid parameter for impersonated user in the kubeconfig."
+	CheckAccessErrorVerdict        = "Access denied due to Azure RBAC check failure. Please retry later."
+	PodsResource                   = "pods"
+	ServiceAccountsResource        = "serviceaccounts"
+	CustomResources                = "customresources"
+	StatusSubresource              = "status"
+	ScaleSubresource               = "scale"
+	LogSubresource                 = "log"
+	LogsSubresource                = "logs"
+	TokenSubresource               = "token"
+	EphemeralContainersSubresource = "ephemeralcontainers"
+	execActionSegment              = "exec/action"
+	impersonateActionSegment       = "impersonate/action"
+	actionSuffix                   = "action"
+	wildcardValue                  = "*"
+	ReadVerb                       = "read"
+	WriteVerb                      = "write"
+	DeleteVerb                     = "delete"
 )
 
 var getStoredOperationsMap = azureutils.DeepCopyOperationsMap
@@ -263,7 +268,7 @@ func getActionName(verb string) string {
 // ones added later by Kubernetes, CRDs or aggregated API servers - gets its own
 // "<resource>/<subresource>/action", so it is never silently covered by the
 // parent's permission. This is why pods exec/attach/portforward/proxy,
-// services/proxy, nodes/proxy and serviceaccounts/token stay distinct.
+// services/proxy and nodes/proxy stay distinct.
 var safeSubresources = map[string]struct{}{
 	StatusSubresource: {},
 	ScaleSubresource:  {},
@@ -283,8 +288,8 @@ var safeSubresources = map[string]struct{}{
 // "az provider operation show --namespace Microsoft.ContainerService"; drop an
 // entry once that command lists its "<resource>/<subresource>/action".
 //
-// pods attach/portforward/proxy, services/proxy, nodes/proxy and
-// serviceaccounts/token are deliberately absent. Their actions are unpublished
+// pods attach/portforward/proxy, services/proxy and nodes/proxy are
+// deliberately absent. Their actions are unpublished
 // too, but guard already emits them: each was a reviewed security decision that
 // accepted the gap and left provider registration as follow-up. Reverting those
 // is not in scope here.
@@ -296,6 +301,28 @@ var unregisteredSubresources = map[string]struct{}{
 	"eviction":            {}, // kubectl drain, PDB-aware eviction
 	"finalize":            {}, // namespace teardown
 	"resize":              {}, // in-place pod resource resize
+}
+
+// equivalentPublishedActions maps a resource/subresource pair whose own action is
+// unpublished onto a published action with the same authority. Confirm the target
+// with "az provider operation show --namespace Microsoft.ContainerService".
+var equivalentPublishedActions = map[string]map[string]string{
+	ServiceAccountsResource: {
+		// TokenRequest mints a bearer token for the ServiceAccount. Upstream's
+		// edit ClusterRole grants "impersonate" on serviceaccounts and "create"
+		// on serviceaccounts/token together and implies neither from writing the
+		// object, so impersonate matches its authority.
+		TokenSubresource: impersonateActionSegment,
+	},
+}
+
+// additionalWriteActions lists subresources whose create, update and patch need a
+// published action on top of the parent's write.
+var additionalWriteActions = map[string]map[string]string{
+	PodsResource: {
+		// kubectl debug starts a container inside the running Pod, as exec does.
+		EphemeralContainersSubresource: execActionSegment,
+	},
 }
 
 // collapsesIntoParent reports whether subResource is authorized by the parent
@@ -322,11 +349,28 @@ func getResourceAndAction(resource string, subResource string, verb string) stri
 		return path.Join(resource, action)
 	}
 
+	// Before the collapse check, so a mapped pair never falls back to the parent.
+	if segment, ok := equivalentPublishedActions[resource][subResource]; ok {
+		return path.Join(resource, segment)
+	}
+
 	if collapsesIntoParent(subResource) {
 		return path.Join(resource, action)
 	}
 
 	return path.Join(resource, subResource, actionSuffix)
+}
+
+// getResourceActions returns every action a request needs; all must be allowed.
+func getResourceActions(resource string, subResource string, verb string) []string {
+	actions := []string{getResourceAndAction(resource, subResource, verb)}
+	if getActionName(verb) != WriteVerb {
+		return actions
+	}
+	if segment, ok := additionalWriteActions[resource][subResource]; ok {
+		actions = append(actions, path.Join(resource, segment))
+	}
+	return actions
 }
 
 func getDataActions(ctx context.Context, subRevReq *authzv1.SubjectAccessReviewSpec, clusterType string, allowCustomResourceTypeCheck bool, allowSubresourceTypeCheck bool) ([]azureutils.AuthorizationActionInfo, error) {
@@ -351,10 +395,6 @@ func getDataActions(ctx context.Context, subRevReq *authzv1.SubjectAccessReviewS
 				| Verb, Res and Group are not * | Normal single resource call at cluster scope | Normal single resource call  at ns scope |
 
 			*/
-			authInfoSingle := azureutils.AuthorizationActionInfo{
-				IsDataAction: true,
-			}
-
 			if isCustomerResourceTypeCheckAvailable && isCustomResourceAccessRequest(subRevReq, storedOperationsMap) {
 				/*
 					In this case both Res and Group are not *, but there is no matching DataAction present on the storedOperationsMap.
@@ -364,21 +404,10 @@ func getDataActions(ctx context.Context, subRevReq *authzv1.SubjectAccessReviewS
 				return getAuthInfoListForCustomResource(ctx, subRevReq, clusterType)
 			}
 
-			authInfoSingle.AuthorizationEntity.Id = clusterType
-
-			if subRevReq.ResourceAttributes.Group != "" {
-				authInfoSingle.AuthorizationEntity.Id = path.Join(authInfoSingle.AuthorizationEntity.Id, subRevReq.ResourceAttributes.Group)
+			authInfoList, err = getAuthInfoListForResource(subRevReq, clusterType, allowSubresourceTypeCheck)
+			if err != nil {
+				return nil, err
 			}
-
-			action := getResourceAndAction(subRevReq.ResourceAttributes.Resource, subRevReq.ResourceAttributes.Subresource, subRevReq.ResourceAttributes.Verb)
-			authInfoSingle.AuthorizationEntity.Id = path.Join(authInfoSingle.AuthorizationEntity.Id, action)
-			if allowSubresourceTypeCheck {
-				err = setAuthInfoSubresourceAttributes(&authInfoSingle, subRevReq)
-				if err != nil {
-					return nil, fmt.Errorf("Error while setting subresource attributes: %s", err.Error())
-				}
-			}
-			authInfoList = append(authInfoList, authInfoSingle)
 
 		} else {
 			if len(storedOperationsMap) == 0 {
@@ -401,6 +430,30 @@ func getDataActions(ctx context.Context, subRevReq *authzv1.SubjectAccessReviewS
 		}
 		authInfoSingle.AuthorizationEntity.Id = path.Join(clusterType, subRevReq.NonResourceAttributes.Path, getActionName(subRevReq.NonResourceAttributes.Verb))
 		authInfoList = append(authInfoList, authInfoSingle)
+	}
+	return authInfoList, nil
+}
+
+func getAuthInfoListForResource(subRevReq *authzv1.SubjectAccessReviewSpec, clusterType string, allowSubresourceTypeCheck bool) ([]azureutils.AuthorizationActionInfo, error) {
+	attr := subRevReq.ResourceAttributes
+	prefix := clusterType
+	if attr.Group != "" {
+		prefix = path.Join(prefix, attr.Group)
+	}
+
+	actions := getResourceActions(attr.Resource, attr.Subresource, attr.Verb)
+	authInfoList := make([]azureutils.AuthorizationActionInfo, 0, len(actions))
+	for _, action := range actions {
+		authInfo := azureutils.AuthorizationActionInfo{
+			AuthorizationEntity: azureutils.AuthorizationEntity{Id: path.Join(prefix, action)},
+			IsDataAction:        true,
+		}
+		if allowSubresourceTypeCheck {
+			if err := setAuthInfoSubresourceAttributes(&authInfo, subRevReq); err != nil {
+				return nil, fmt.Errorf("Error while setting subresource attributes: %w", err)
+			}
+		}
+		authInfoList = append(authInfoList, authInfo)
 	}
 	return authInfoList, nil
 }
@@ -718,6 +771,16 @@ func (c *cacheKeyBuilder) addString(value string) {
 	c.builder = append(c.builder, value...)
 }
 
+// addStringSlice appends values as one length-prefixed record of length-prefixed
+// strings, as addStringSlice does in upstream's buildKey.
+func (c *cacheKeyBuilder) addStringSlice(values []string) {
+	var nested cacheKeyBuilder
+	for _, value := range values {
+		nested.addString(value)
+	}
+	c.addString(string(nested.builder))
+}
+
 // build returns the hex-encoded digest of the accumulated fields, suffixed with
 // the un-hashed user name.
 func (c *cacheKeyBuilder) build() string {
@@ -739,9 +802,8 @@ func cachedSubresource(attr *authzv1.ResourceAttributes, allowSubresourceTypeChe
 // subRevReq is cached. See cacheKeyBuilder for why the encoding is length-prefixed
 // and hashed rather than joined.
 //
-// The set of fields is unchanged, so cache hit rates are unaffected: the resource
-// branch keys on the derived action from getResourceAndAction, which maps get, list
-// and watch onto "read", and the non-resource branch keys on getActionName.
+// The resource branch keys on the derived actions from getResourceActions, which
+// maps get, list and watch onto "read"; the non-resource branch keys on getActionName.
 func getResultCacheKey(subRevReq *authzv1.SubjectAccessReviewSpec, allowSubresourceTypeCheck bool) string {
 	switch {
 	case subRevReq.ResourceAttributes != nil:
@@ -749,7 +811,7 @@ func getResultCacheKey(subRevReq *authzv1.SubjectAccessReviewSpec, allowSubresou
 		key := newCacheKeyBuilder(subRevReq.User, cacheKeyShapeResource)
 		key.addString(attr.Namespace)
 		key.addString(attr.Group)
-		key.addString(getResourceAndAction(attr.Resource, attr.Subresource, attr.Verb))
+		key.addStringSlice(getResourceActions(attr.Resource, attr.Subresource, attr.Verb))
 		key.addString(cachedSubresource(attr, allowSubresourceTypeCheck))
 		return key.build()
 
