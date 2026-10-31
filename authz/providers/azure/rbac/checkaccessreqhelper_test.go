@@ -631,6 +631,17 @@ func Test_getDataActions(t *testing.T) {
 			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/pods/read"}, IsDataAction: true}},
 		},
 
+		{
+			"podsEphemeralContainersDeleteAKS",
+			args{
+				isWildcardTest: false,
+				subRevReq: &authzv1.SubjectAccessReviewSpec{
+					ResourceAttributes: &authzv1.ResourceAttributes{Group: "", Resource: "pods", Subresource: EphemeralContainersSubresource, Version: "v1", Name: "test", Verb: "delete"},
+				}, clusterType: aksClusterType,
+			},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/pods/delete"}, IsDataAction: true}},
+		},
+
 		// Writing the Pod object itself is unchanged, so the mapping does not
 		// over-restrict ordinary Pod CRUD.
 		{
@@ -656,7 +667,7 @@ func Test_getDataActions(t *testing.T) {
 		},
 
 		// A subresource that is mapped on one resource must not be mapped on a
-		// different resource: the table is keyed by resource/subresource pair.
+		// different resource: the tables are keyed by resource/subresource pair.
 		{
 			"otherResourceTokenSubresourceUnmappedAKS",
 			args{
@@ -666,6 +677,17 @@ func Test_getDataActions(t *testing.T) {
 				}, clusterType: aksClusterType,
 			},
 			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/secrets/token/action"}, IsDataAction: true}},
+		},
+
+		{
+			"otherResourceEphemeralContainersPatchAKS",
+			args{
+				isWildcardTest: false,
+				subRevReq: &authzv1.SubjectAccessReviewSpec{
+					ResourceAttributes: &authzv1.ResourceAttributes{Group: "", Resource: "secrets", Subresource: EphemeralContainersSubresource, Version: "v1", Name: "test", Verb: "patch"},
+				}, clusterType: aksClusterType,
+			},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/secrets/write"}, IsDataAction: true}},
 		},
 
 		// Writing the ServiceAccount object itself is unchanged: it must still
@@ -1908,12 +1930,14 @@ func Test_cacheKeyBuilder_addStringSliceKeepsBoundaries(t *testing.T) {
 	}
 
 	keys := map[string]string{
-		"two values":           encode([]string{write, exec}, ""),
-		"boundary moved":       encode([]string{write + "pods", "/exec/action"}, ""),
-		"one joined value":     encode([]string{write + exec}, ""),
-		"value moved to next":  encode([]string{write}, exec),
-		"trailing empty value": encode([]string{write, exec, ""}, ""),
-		"no values":            encode(nil, write),
+		"two values":                 encode([]string{write, exec}, ""),
+		"boundary moved":             encode([]string{write + "pods", "/exec/action"}, ""),
+		"slash moved between values": encode([]string{PodsResource, "write/" + exec}, ""),
+		"comma inside one value":     encode([]string{write + "," + exec}, ""),
+		"one joined value":           encode([]string{write + exec}, ""),
+		"value moved to next":        encode([]string{write}, exec),
+		"trailing empty value":       encode([]string{write, exec, ""}, ""),
+		"no values":                  encode(nil, write),
 	}
 	seen := make(map[string]string, len(keys))
 	for name, key := range keys {
