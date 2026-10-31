@@ -77,6 +77,23 @@ func setStoredOperationsMap(t *testing.T, m azureutils.OperationsMap) {
 	getStoredOperationsMap = func() azureutils.OperationsMap { return m }
 }
 
+func assertSameActions(t *testing.T, got, want []azureutils.AuthorizationActionInfo) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("getDataActions() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if !reflect.DeepEqual(got[i].AuthorizationEntity, want[i].AuthorizationEntity) {
+			t.Errorf("getDataActions() = %v, want %v", got, want)
+		}
+		for key, value := range want[i].Attributes {
+			if got[i].Attributes[key] != value {
+				t.Errorf("getDataActions() Attributes [%v]: got %q, want %q", key, got[i].Attributes[key], value)
+			}
+		}
+	}
+}
+
 func Test_getScope(t *testing.T) {
 	type args struct {
 		resourceId                      string
@@ -532,9 +549,8 @@ func Test_getDataActions(t *testing.T) {
 			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "fleet/serviceaccounts/impersonate/action"}, IsDataAction: true}},
 		},
 
-		// Injecting an ephemeral container executes code in the running Pod, so
-		// it must not be authorized by pods/write. The provider publishes no
-		// ephemeralcontainers action, so it maps onto pods/exec/action.
+		// A write to pods/ephemeralcontainers needs pods/exec/action on top of
+		// pods/write; a read stays a Pod read.
 		{
 			"podsEphemeralContainersPatchAKS",
 			args{
@@ -543,7 +559,38 @@ func Test_getDataActions(t *testing.T) {
 					ResourceAttributes: &authzv1.ResourceAttributes{Group: "", Resource: "pods", Subresource: EphemeralContainersSubresource, Version: "v1", Name: "test", Verb: "patch"},
 				}, clusterType: aksClusterType,
 			},
-			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/pods/exec/action"}, IsDataAction: true}},
+			[]azureutils.AuthorizationActionInfo{
+				{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/pods/write"}, IsDataAction: true},
+				{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/pods/exec/action"}, IsDataAction: true},
+			},
+		},
+
+		{
+			"podsEphemeralContainersUpdateAKS",
+			args{
+				isWildcardTest: false,
+				subRevReq: &authzv1.SubjectAccessReviewSpec{
+					ResourceAttributes: &authzv1.ResourceAttributes{Group: "", Resource: "pods", Subresource: EphemeralContainersSubresource, Version: "v1", Name: "test", Verb: "update"},
+				}, clusterType: aksClusterType,
+			},
+			[]azureutils.AuthorizationActionInfo{
+				{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/pods/write"}, IsDataAction: true},
+				{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/pods/exec/action"}, IsDataAction: true},
+			},
+		},
+
+		{
+			"podsEphemeralContainersCreateAKS",
+			args{
+				isWildcardTest: false,
+				subRevReq: &authzv1.SubjectAccessReviewSpec{
+					ResourceAttributes: &authzv1.ResourceAttributes{Group: "", Resource: "pods", Subresource: EphemeralContainersSubresource, Version: "v1", Name: "test", Verb: "create"},
+				}, clusterType: aksClusterType,
+			},
+			[]azureutils.AuthorizationActionInfo{
+				{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/pods/write"}, IsDataAction: true},
+				{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/pods/exec/action"}, IsDataAction: true},
+			},
 		},
 
 		{
@@ -554,12 +601,26 @@ func Test_getDataActions(t *testing.T) {
 					ResourceAttributes: &authzv1.ResourceAttributes{Group: "", Resource: "pods", Subresource: EphemeralContainersSubresource, Version: "v1", Name: "test", Verb: "update"},
 				}, clusterType: "fleet",
 			},
-			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "fleet/pods/exec/action"}, IsDataAction: true}},
+			[]azureutils.AuthorizationActionInfo{
+				{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "fleet/pods/write"}, IsDataAction: true},
+				{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "fleet/pods/exec/action"}, IsDataAction: true},
+			},
 		},
 
-		// The mapping is deliberately verb-agnostic: a read of the subresource
-		// maps to exec/action too, rather than collapsing to pods/read. Pinned
-		// so a later verb-aware refactor cannot flip it silently.
+		{
+			"podsEphemeralContainersPatchArc",
+			args{
+				isWildcardTest: false,
+				subRevReq: &authzv1.SubjectAccessReviewSpec{
+					ResourceAttributes: &authzv1.ResourceAttributes{Group: "", Resource: "pods", Subresource: EphemeralContainersSubresource, Version: "v1", Name: "test", Verb: "patch"},
+				}, clusterType: "arc",
+			},
+			[]azureutils.AuthorizationActionInfo{
+				{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "arc/pods/write"}, IsDataAction: true},
+				{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "arc/pods/exec/action"}, IsDataAction: true},
+			},
+		},
+
 		{
 			"podsEphemeralContainersGetAKS",
 			args{
@@ -568,7 +629,7 @@ func Test_getDataActions(t *testing.T) {
 					ResourceAttributes: &authzv1.ResourceAttributes{Group: "", Resource: "pods", Subresource: EphemeralContainersSubresource, Version: "v1", Name: "test", Verb: "get"},
 				}, clusterType: aksClusterType,
 			},
-			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/pods/exec/action"}, IsDataAction: true}},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/pods/read"}, IsDataAction: true}},
 		},
 
 		// Writing the Pod object itself is unchanged, so the mapping does not
@@ -582,6 +643,17 @@ func Test_getDataActions(t *testing.T) {
 				}, clusterType: aksClusterType,
 			},
 			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/pods/write"}, IsDataAction: true}},
+		},
+
+		{
+			"podsPatchUnchangedArc",
+			args{
+				isWildcardTest: false,
+				subRevReq: &authzv1.SubjectAccessReviewSpec{
+					ResourceAttributes: &authzv1.ResourceAttributes{Group: "", Resource: "pods", Version: "v1", Name: "test", Verb: "patch"},
+				}, clusterType: "arc",
+			},
+			[]azureutils.AuthorizationActionInfo{{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "arc/pods/write"}, IsDataAction: true}},
 		},
 
 		// A subresource that is mapped on one resource must not be mapped on a
@@ -977,6 +1049,21 @@ func Test_getDataActions(t *testing.T) {
 		},
 
 		{
+			"subresourceEphemeralContainersPatch",
+			args{
+				isSubresTest:   true,
+				isWildcardTest: false,
+				subRevReq: &authzv1.SubjectAccessReviewSpec{
+					ResourceAttributes: &authzv1.ResourceAttributes{Group: "", Resource: "pods", Subresource: EphemeralContainersSubresource, Version: "*", Name: "test", Verb: "patch"},
+				}, clusterType: aksClusterType,
+			},
+			[]azureutils.AuthorizationActionInfo{
+				{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/pods/write"}, IsDataAction: true, Attributes: map[string]string{subresourceAttr: EphemeralContainersSubresource}},
+				{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/pods/exec/action"}, IsDataAction: true, Attributes: map[string]string{subresourceAttr: EphemeralContainersSubresource}},
+			},
+		},
+
+		{
 			"subresourceVerbIsStar",
 			args{
 				isSubresTest:   true,
@@ -1001,16 +1088,7 @@ func Test_getDataActions(t *testing.T) {
 			ctx := context.Background()
 			got, _ := getDataActions(ctx, tt.args.subRevReq, tt.args.clusterType, tt.args.isCrTest, tt.args.isSubresTest)
 			if !tt.args.isWildcardTest {
-				if !reflect.DeepEqual(got[0].AuthorizationEntity, tt.want[0].AuthorizationEntity) {
-					t.Errorf("getDataActions() = %v, want %v", got, tt.want)
-				}
-
-				for key, value := range tt.want[0].Attributes {
-					if got[0].Attributes[key] != value {
-						t.Errorf("getDataActions() Attributes [%v]: got \"%v\", want \"%v\"", key, got[0].Attributes[key], value)
-						break
-					}
-				}
+				assertSameActions(t, got, tt.want)
 			} else {
 				gotSet := createSet(got)
 				wantSet := createSet(tt.want)
@@ -1601,6 +1679,18 @@ func cacheKeyDistinctCases() []cacheKeyCase {
 		}
 	}
 
+	podsCase := func(name, subresource, verb string) cacheKeyCase {
+		return cacheKeyCase{
+			name: name,
+			subRevReq: &authzv1.SubjectAccessReviewSpec{
+				User: cacheKeyTestUser,
+				ResourceAttributes: &authzv1.ResourceAttributes{
+					Namespace: "debug", Resource: "pods", Subresource: subresource, Verb: verb,
+				},
+			},
+		}
+	}
+
 	return []cacheKeyCase{
 		resourceCase("empty namespace", cacheKeyTestUser, "", cacheKeyTestGroup),
 		resourceCase("namespace equal to the former empty placeholder", cacheKeyTestUser, "-", cacheKeyTestGroup),
@@ -1632,6 +1722,10 @@ func cacheKeyDistinctCases() []cacheKeyCase {
 				},
 			},
 		},
+		// An ephemeral container write needs both actions the other two need.
+		podsCase("pod write", "", "patch"),
+		podsCase("ephemeral container write", EphemeralContainersSubresource, "patch"),
+		podsCase("pod exec", "exec", "create"),
 		{
 			name: "resource request",
 			subRevReq: &authzv1.SubjectAccessReviewSpec{
@@ -1794,6 +1888,34 @@ func Test_getResultCacheKey_noResourceNonResourceCollision(t *testing.T) {
 			}
 			nonResourceKeys[got] = p
 		}
+	}
+}
+
+// Test_cacheKeyBuilder_addStringSliceKeepsBoundaries asserts that moving a value
+// across an element boundary, or out of the slice into the next field, changes the key.
+func Test_cacheKeyBuilder_addStringSliceKeepsBoundaries(t *testing.T) {
+	const write, exec = "pods/write", "pods/exec/action"
+	encode := func(values []string, next string) string {
+		key := newCacheKeyBuilder(cacheKeyTestUser, cacheKeyShapeResource)
+		key.addStringSlice(values)
+		key.addString(next)
+		return key.build()
+	}
+
+	keys := map[string]string{
+		"two values":           encode([]string{write, exec}, ""),
+		"boundary moved":       encode([]string{write + "pods", "/exec/action"}, ""),
+		"one joined value":     encode([]string{write + exec}, ""),
+		"value moved to next":  encode([]string{write}, exec),
+		"trailing empty value": encode([]string{write, exec, ""}, ""),
+		"no values":            encode(nil, write),
+	}
+	seen := make(map[string]string, len(keys))
+	for name, key := range keys {
+		if previous, collides := seen[key]; collides {
+			t.Errorf("%q and %q share cache key %q", previous, name, key)
+		}
+		seen[key] = name
 	}
 }
 

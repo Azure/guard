@@ -172,9 +172,10 @@ guard run \
 
 ## DataAction Mapping
 
-Guard turns each `SubjectAccessReview` into one or more Azure DataAction strings. The
-functions `getResourceAndAction` and `getDataActions` in `rbac/checkaccessreqhelper.go`
-compose these strings.
+Guard turns each `SubjectAccessReview` into one or more Azure DataAction strings, and
+CheckAccess allows the request only when every string is allowed. The functions
+`getResourceAndAction`, `getResourceActions` and `getDataActions` in
+`rbac/checkaccessreqhelper.go` compose these strings.
 
 Guard does not own the action namespace. Azure RBAC can evaluate an action only if the
 resource provider already publishes it. If Guard sends an action that the provider does
@@ -230,14 +231,14 @@ If the operation is absent:
   its 24 wildcards.
 
 Status of the actions used by the mapping. The "Measured" column records when each row
-was last checked; rows dated 2026-10-14 were sampled over 24 spaced polls with
+was last checked; rows dated 2026-10-14 or later were sampled over 24 spaced polls with
 `pods/exec/action`, `certificatesigningrequests/nodeclient/action` and
 `certificatesigningrequests/selfnodeclient/action` asserted as controls on every poll.
 
 | Action                                                                                | Registered | Measured   |
 | ------------------------------------------------------------------------------------- | ---------- | ---------- |
 | `managedClusters/pods/{read,write,delete}`                                             | Yes        | 2026-09-25 |
-| `managedClusters/pods/exec/action`                                                     | Yes        | 2026-10-14 |
+| `managedClusters/pods/exec/action`                                                     | Yes        | 2026-10-31 |
 | `managedClusters/serviceaccounts/impersonate/action`                                   | Yes        | 2026-10-14 |
 | `managedClusters/certificates.k8s.io/certificatesigningrequests/{read,write,delete}`   | Yes        | 2026-09-25 |
 | `managedClusters/certificates.k8s.io/certificatesigningrequests/nodeclient/action`     | Yes        | 2026-10-14 |
@@ -245,16 +246,16 @@ was last checked; rows dated 2026-10-14 were sampled over 24 spaced polls with
 | `managedClusters/services/proxy/action`                                                | No         | 2026-09-25 |
 | `managedClusters/nodes/proxy/action`                                                   | No         | 2026-09-25 |
 | `managedClusters/serviceaccounts/token/action`                                         | No         | 2026-10-14 |
-| `managedClusters/pods/ephemeralcontainers/action`                                      | No         | 2026-10-14 |
+| `managedClusters/pods/ephemeralcontainers/action`                                      | No         | 2026-10-31 |
 
 `nodeclient/action` was unregistered when this section was first measured on
 2026-08-18 and has since been published. Re-run the `az` check rather than trusting
 this table; it records a measurement, not a guarantee.
 
 `serviceaccounts/token/action` and `pods/ephemeralcontainers/action` are both still
-unregistered, but guard no longer emits either: `equivalentPublishedActions` redirects
-those two subresources onto `serviceaccounts/impersonate/action` and `pods/exec/action`,
-which are registered.
+unregistered, and guard emits neither. `serviceaccounts/token` maps onto
+`serviceaccounts/impersonate/action`. A write to `pods/ephemeralcontainers` needs both
+`pods/write` and `pods/exec/action`. All three of those actions are registered.
 
 Which built-in role still matches each unregistered action guard emits:
 
@@ -311,6 +312,8 @@ flowchart TD
         C2 --> C2a["safeSubresources<br/>+ unregisteredSubresources"]
         C2a --> C3["Collapsed: Id becomes<br/>resource/verb"]
         C2 --> C4["Otherwise: Id becomes<br/>resource/subresource/action<br/>MUST be registered by the RP"]
+        C0a & C3 & C4 --> C5{"Write listed in<br/>additionalWriteActions?"}
+        C5 -->|yes| C6["A second Id is added:<br/>resource/extra/action<br/>MUST be registered.<br/>Both must be allowed."]
     end
 
     subgraph M2["Mechanism B: Subresource attribute"]
@@ -321,13 +324,14 @@ flowchart TD
 
     style C3 fill:#d4f5d4,stroke:#2a7,color:#000
     style C0a fill:#d4f5d4,stroke:#2a7,color:#000
+    style C6 fill:#d4f5d4,stroke:#2a7,color:#000
     style C4 fill:#ffd6cc,stroke:#a33,color:#000
     style D3 fill:#d4f5d4,stroke:#2a7,color:#000
 ```
 
 | Mechanism                        | Code                               | Controlled by                                                              | Effect                                                                                      |
 | -------------------------------- | ---------------------------------- | -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| A. DataAction Id                 | `getResourceAndAction`             | `equivalentPublishedActions`, `safeSubresources` and `unregisteredSubresources` | A subresource on none of the three tables stays in the action string. The operation must exist in the registry. |
+| A. DataAction Id                 | `getResourceAndAction`, `getResourceActions` | `equivalentPublishedActions`, `safeSubresources`, `unregisteredSubresources` and `additionalWriteActions` | A subresource on none of the first three tables stays in the action string. `additionalWriteActions` adds a second action to some writes. Every action must exist in the registry. |
 | B. Subresource attribute         | `setAuthInfoSubresourceAttributes` | `subresourceAttributeAllowlist` and `--azure.allow-subresource-type-check` | The subresource is sent next to the action as an attribute. The action string is unchanged. |
 
 Only mechanism A is subject to the registry invariant.
@@ -353,18 +357,27 @@ A third table redirects instead of collapsing:
 - `equivalentPublishedActions` - the subresource is privileged enough that collapsing
   into the parent would hide it, but its own action is unpublished, so emitting that
   would deny the operation outright. Where the provider publishes a different action
-  of equivalent authority, the pair maps onto it: `pods/ephemeralcontainers` onto
-  `pods/exec/action` and `serviceaccounts/token` onto
+  of equivalent authority, the pair maps onto it: `serviceaccounts/token` onto
   `serviceaccounts/impersonate/action`. Unlike the other two, this table is keyed by
   resource *and* subresource, so a same-named subresource on another resource is
   unaffected. It is consulted before the collapse check, and the target must be
   registered - verify with the `az` check before adding an entry.
 
-The redirect is a closest match, not an identity. An ephemeral container chooses its
-own image and `securityContext`, so a principal holding only `pods/exec/action` gains
-slightly more than exec through this mapping. Customers who need the two separated can
-enable `--azure.allow-subresource-type-check` and write an ABAC condition on the
-`subresource` attribute, which mechanism B sends alongside the action.
+A fourth table adds an action instead of replacing one:
+
+- `additionalWriteActions` - a create, update or patch on the pair needs a second
+  published action on top of the one resolved above. `pods/ephemeralcontainers`
+  (`kubectl debug`) collapses into `pods/write` like any unregistered subresource, and
+  a write to it also needs `pods/exec/action`, because the new container runs inside
+  the live Pod. A read stays a single `pods/read`. This table is also keyed by
+  resource and subresource, and the added action must be registered.
+
+Requiring both actions never allows a request that `pods/write` alone denied. A
+condition on a `pods/write` assignment still applies to `kubectl debug`, and an
+exec-only role does not gain ephemeral containers, which choose their own image and
+`securityContext`. A role that grants `pods/write` without `pods/exec/action` can no
+longer run `kubectl debug`. With `--azure.allow-subresource-type-check`, both actions
+carry the `subresource` attribute, which mechanism B sends alongside the action.
 
 ## Custom Resource Definition (CRD) Support
 
