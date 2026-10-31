@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/url"
 	"reflect"
@@ -83,13 +84,11 @@ func assertSameActions(t *testing.T, got, want []azureutils.AuthorizationActionI
 		t.Fatalf("getDataActions() = %v, want %v", got, want)
 	}
 	for i := range want {
-		if !reflect.DeepEqual(got[i].AuthorizationEntity, want[i].AuthorizationEntity) {
-			t.Errorf("getDataActions() = %v, want %v", got, want)
+		if got[i].AuthorizationEntity != want[i].AuthorizationEntity || got[i].IsDataAction != want[i].IsDataAction {
+			t.Errorf("getDataActions()[%d] = %+v, want %+v", i, got[i], want[i])
 		}
-		for key, value := range want[i].Attributes {
-			if got[i].Attributes[key] != value {
-				t.Errorf("getDataActions() Attributes [%v]: got %q, want %q", key, got[i].Attributes[key], value)
-			}
+		if !maps.Equal(got[i].Attributes, want[i].Attributes) {
+			t.Errorf("getDataActions()[%d] Attributes = %v, want %v", i, got[i].Attributes, want[i].Attributes)
 		}
 	}
 }
@@ -956,7 +955,10 @@ func Test_getDataActions(t *testing.T) {
 				}, clusterType: aksClusterType,
 			},
 			[]azureutils.AuthorizationActionInfo{
-				{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/customresources/read"}, IsDataAction: true},
+				{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/customresources/read"}, IsDataAction: true, Attributes: map[string]string{
+					"Microsoft.ContainerService/managedClusters/customResources:kind":  "contosoCustomResource",
+					"Microsoft.ContainerService/managedClusters/customResources:group": "customresources.contoso.io",
+				}},
 			},
 		},
 
@@ -1016,7 +1018,10 @@ func Test_getDataActions(t *testing.T) {
 				}, clusterType: aksClusterType,
 			},
 			[]azureutils.AuthorizationActionInfo{
-				{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/customresources/read"}, IsDataAction: true},
+				{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/customresources/read"}, IsDataAction: true, Attributes: map[string]string{
+					"Microsoft.ContainerService/managedClusters/customResources:kind":  "aCustomResource",
+					"Microsoft.ContainerService/managedClusters/customResources:group": "apps",
+				}},
 			},
 		},
 
