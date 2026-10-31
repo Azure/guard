@@ -1729,8 +1729,8 @@ func cacheKeyDistinctCases() []cacheKeyCase {
 		resourceCase("user without the separator, long namespace", "a", "b/c", cacheKeyTestGroup),
 		subresourceCase("subresource check disabled", false),
 		subresourceCase("subresource check enabled", true),
-		// An unsafe subresource resolves to its own action, so it must not share
-		// the parent's cache entry even though the subresource is not on the key.
+		// An unsafe subresource never resolves to the parent's action, so it must not
+		// share the parent's cache entry even though the subresource is not on the key.
 		{
 			name: "parent resource without a subresource",
 			subRevReq: &authzv1.SubjectAccessReviewSpec{
