@@ -861,6 +861,7 @@ const (
 	grantingTestResourceID = "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.ContainerService/managedClusters/cluster"
 	podsWriteDataAction    = managedClusters + "/pods/write"
 	podsExecDataAction     = managedClusters + "/pods/exec/action"
+	patchVerb              = "patch"
 )
 
 // grantedDecision answers like a role that grants exactly the listed actions.
@@ -923,7 +924,7 @@ func assertPodPatchDecision(t *testing.T, info *AccessInfo, subresource string, 
 		User:  "alpha@bing.com",
 		Extra: map[string]authzv1.ExtraValue{"oid": {"00000000-0000-0000-0000-000000000000"}},
 		ResourceAttributes: &authzv1.ResourceAttributes{
-			Namespace: "dev", Resource: "pods", Subresource: subresource, Version: "v1", Name: "test", Verb: "patch",
+			Namespace: "dev", Resource: "pods", Subresource: subresource, Version: "v1", Name: "test", Verb: patchVerb,
 		},
 	}
 	status, err := info.CheckAccess(context.Background(), request)
