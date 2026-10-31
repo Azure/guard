@@ -289,10 +289,10 @@ var safeSubresources = map[string]struct{}{
 // entry once that command lists its "<resource>/<subresource>/action".
 //
 // pods attach/portforward/proxy, services/proxy and nodes/proxy are
-// deliberately absent. Their actions are unpublished too, but guard already
-// emits them: each was a reviewed security decision that accepted the gap and
-// left provider registration as follow-up. Reverting those is not in scope
-// here.
+// deliberately absent. Their actions are unpublished
+// too, but guard already emits them: each was a reviewed security decision that
+// accepted the gap and left provider registration as follow-up. Reverting those
+// is not in scope here.
 var unregisteredSubresources = map[string]struct{}{
 	"approval":            {}, // kubectl certificate approve/deny
 	"approvals":           {}, // plural spelling guard has historically seen
@@ -325,15 +325,6 @@ var additionalWriteActions = map[string]map[string]string{
 	},
 }
 
-func equivalentPublishedAction(resource, subResource string) (string, bool) {
-	subs, ok := equivalentPublishedActions[resource]
-	if !ok {
-		return "", false
-	}
-	segment, ok := subs[subResource]
-	return segment, ok
-}
-
 // collapsesIntoParent reports whether subResource is authorized by the parent
 // resource's action rather than by one of its own.
 func collapsesIntoParent(subResource string) bool {
@@ -359,7 +350,7 @@ func getResourceAndAction(resource string, subResource string, verb string) stri
 	}
 
 	// Before the collapse check, so a mapped pair never falls back to the parent.
-	if segment, ok := equivalentPublishedAction(resource, subResource); ok {
+	if segment, ok := equivalentPublishedActions[resource][subResource]; ok {
 		return path.Join(resource, segment)
 	}
 
