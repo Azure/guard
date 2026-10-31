@@ -811,9 +811,8 @@ func cachedSubresource(attr *authzv1.ResourceAttributes, allowSubresourceTypeChe
 // subRevReq is cached. See cacheKeyBuilder for why the encoding is length-prefixed
 // and hashed rather than joined.
 //
-// The set of fields is unchanged, so cache hit rates are unaffected: the resource
-// branch keys on the derived actions from getResourceActions, which maps get, list
-// and watch onto "read", and the non-resource branch keys on getActionName.
+// The resource branch keys on the derived actions from getResourceActions, which
+// maps get, list and watch onto "read"; the non-resource branch keys on getActionName.
 func getResultCacheKey(subRevReq *authzv1.SubjectAccessReviewSpec, allowSubresourceTypeCheck bool) string {
 	switch {
 	case subRevReq.ResourceAttributes != nil:

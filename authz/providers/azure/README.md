@@ -187,9 +187,9 @@ not publish, the result is a denial that the customer cannot correct.
 flowchart TD
     A[SubjectAccessReview] --> B{User starts with 'system:'?}
     B -->|Yes| C[NoOpinion. Azure RBAC is skipped.<br/>Standard AKS nodes stop here.]
-    B -->|No| D[getResourceAndAction]
-    D --> E[DataAction string]
-    E --> F{Operation published by the RP?}
+    B -->|No| D[getResourceActions]
+    D --> E[One or more DataAction strings.<br/>All must be allowed.]
+    E --> F{Each operation published by the RP?}
     F -->|Yes| G[Role can grant it.<br/>Allow or deny by assignment.]
     F -->|No| H["Only a covering wildcard matches.<br/>Writer where it has resource/*,<br/>otherwise Admin and Cluster Admin."]
     H --> I[Denied for Reader and<br/>for every custom role]
