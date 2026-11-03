@@ -48,10 +48,19 @@ Do NOT commit if any check fails.
 Full explanation with diagrams: `authz/providers/azure/README.md`, section
 "DataAction Mapping". Keep the two in sync; this is the short operational form.
 
-`getResourceAndAction` / `getDataActions` in
+`getResourceAndAction`, `getResourceActions` and `getDataActions` in
 `authz/providers/azure/rbac/checkaccessreqhelper.go` compose the DataAction strings that
-Azure RBAC evaluates. A string Guard invents is only authorizable if the RP already
-publishes the matching operation.
+Azure RBAC evaluates. A request can need more than one string, and CheckAccess allows it
+only when every string is allowed. A string Guard invents is only authorizable if the RP
+already publishes the matching operation.
+
+Four tables in that file decide what a subresource maps to. `safeSubresources` and
+`unregisteredSubresources` collapse it into the parent action.
+`equivalentPublishedActions` maps a resource/subresource pair onto another published
+action: `serviceaccounts/token` maps onto `serviceaccounts/impersonate/action`.
+`additionalWriteActions` adds a second action to a create, update or patch: a write to
+`pods/ephemeralcontainers` needs `pods/write` and `pods/exec/action`. Every action these
+tables produce must be published.
 
 **Verify every new action before merging:**
 
@@ -84,8 +93,10 @@ Registered as of 2026-09-25: `managedClusters/pods/{read,write,delete}`,
 `managedClusters/pods/exec/action`,
 `managedClusters/certificates.k8s.io/certificatesigningrequests/{read,write,delete}`,
 `managedClusters/certificates.k8s.io/certificatesigningrequests/nodeclient/action`.
+Registered as of 2026-10-14: `managedClusters/serviceaccounts/impersonate/action`.
 NOT registered: `pods/{attach,portforward,proxy}/action`, `services/proxy/action`,
-`nodes/proxy/action`, `serviceaccounts/token/action`.
+`nodes/proxy/action`, `serviceaccounts/token/action`,
+`pods/ephemeralcontainers/action` (checked 2026-10-31).
 
 `nodeclient/action` was NOT registered on 2026-08-18 and is registered now, so
 re-run the `az` check instead of trusting this list. Only 11 `.../action`
