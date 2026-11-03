@@ -692,21 +692,24 @@ const (
 //
 // build appends the requestor's user name to the hash in clear text. The hash is
 // always 64 characters, so the suffix boundary is fixed and two keys are equal only
-// if their users are equal. The user name is set by the authenticator rather than
-// chosen by the caller, so a hash collision is only ever reachable among a single
-// user's own keys, where it cannot yield a permission that user does not already
-// hold. Hashing also bounds the key length regardless of caller-supplied input.
+// if their users are equal. Hashing keeps the other fields from growing the key.
 type cacheKeyBuilder struct {
 	user    string
 	builder []byte
 }
 
-// newCacheKeyBuilder starts a key for user and shape. It writes the shape byte and
-// the user name first so that ordering is identical for every shape.
-func newCacheKeyBuilder(user string, shape cacheKeyShape) *cacheKeyBuilder {
-	c := &cacheKeyBuilder{user: user, builder: make([]byte, 0, 256)}
+// newCacheKeyBuilder starts a key with the shape and the requestor's identity. The
+// user, UID, groups and extra of a SubjectAccessReview are set by its creator, so
+// the key covers the identity CheckAccess decides on, not just the user name.
+func newCacheKeyBuilder(subRevReq *authzv1.SubjectAccessReviewSpec, shape cacheKeyShape) *cacheKeyBuilder {
+	c := &cacheKeyBuilder{user: subRevReq.User, builder: make([]byte, 0, 256)}
 	c.builder = append(c.builder, byte(shape))
-	c.addString(user)
+	c.addString(subRevReq.User)
+	c.addString(subRevReq.UID)
+	c.addStringSlice(subRevReq.Extra["oid"])
+	groups := getValidSecurityGroups(subRevReq.Groups)
+	slices.Sort(groups)
+	c.addStringSlice(groups)
 	return c
 }
 
@@ -716,6 +719,16 @@ func (c *cacheKeyBuilder) addString(value string) {
 	binary.BigEndian.PutUint32(length[:], uint32(len(value)))
 	c.builder = append(c.builder, length[:]...)
 	c.builder = append(c.builder, value...)
+}
+
+// addStringSlice appends values via addString under one uint32 length prefix.
+func (c *cacheKeyBuilder) addStringSlice(values []string) {
+	offset := len(c.builder)
+	c.builder = append(c.builder, 0, 0, 0, 0)
+	for _, value := range values {
+		c.addString(value)
+	}
+	binary.BigEndian.PutUint32(c.builder[offset:], uint32(len(c.builder)-offset-4))
 }
 
 // build returns the hex-encoded digest of the accumulated fields, suffixed with
@@ -739,14 +752,14 @@ func cachedSubresource(attr *authzv1.ResourceAttributes, allowSubresourceTypeChe
 // subRevReq is cached. See cacheKeyBuilder for why the encoding is length-prefixed
 // and hashed rather than joined.
 //
-// The set of fields is unchanged, so cache hit rates are unaffected: the resource
+// Verbs that map to the same action share one cache entry, because the resource
 // branch keys on the derived action from getResourceAndAction, which maps get, list
 // and watch onto "read", and the non-resource branch keys on getActionName.
 func getResultCacheKey(subRevReq *authzv1.SubjectAccessReviewSpec, allowSubresourceTypeCheck bool) string {
 	switch {
 	case subRevReq.ResourceAttributes != nil:
 		attr := subRevReq.ResourceAttributes
-		key := newCacheKeyBuilder(subRevReq.User, cacheKeyShapeResource)
+		key := newCacheKeyBuilder(subRevReq, cacheKeyShapeResource)
 		key.addString(attr.Namespace)
 		key.addString(attr.Group)
 		key.addString(getResourceAndAction(attr.Resource, attr.Subresource, attr.Verb))
@@ -755,13 +768,13 @@ func getResultCacheKey(subRevReq *authzv1.SubjectAccessReviewSpec, allowSubresou
 
 	case subRevReq.NonResourceAttributes != nil:
 		attr := subRevReq.NonResourceAttributes
-		key := newCacheKeyBuilder(subRevReq.User, cacheKeyShapeNonResource)
+		key := newCacheKeyBuilder(subRevReq, cacheKeyShapeNonResource)
 		key.addString(attr.Path)
 		key.addString(getActionName(attr.Verb))
 		return key.build()
 
 	default:
-		return newCacheKeyBuilder(subRevReq.User, cacheKeyShapeNeither).build()
+		return newCacheKeyBuilder(subRevReq, cacheKeyShapeNeither).build()
 	}
 }
 
