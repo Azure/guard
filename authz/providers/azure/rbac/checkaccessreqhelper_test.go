@@ -1907,6 +1907,52 @@ func Test_buildCheckAccessURL(t *testing.T) {
 	}
 }
 
+func Test_ConvertCheckAccessResponse_EmptyDecisionList(t *testing.T) {
+	tests := []struct {
+		name        string
+		body        string
+		wantErr     bool
+		wantAllowed bool
+		wantDenied  bool
+	}{
+		{
+			name:    "empty decision array fails closed instead of panicking",
+			body:    `[]`,
+			wantErr: true,
+		},
+		{
+			name:    "null decision list fails closed instead of panicking",
+			body:    `null`,
+			wantErr: true,
+		},
+		{
+			name:        "single allowed decision is still allowed",
+			body:        `[{"accessDecision":"Allowed","actionId":"Microsoft.ContainerService/managedClusters/pods/read","isDataAction":true,"roleAssignment":{"id":"ra-1","roleDefinitionId":"rd-1"}}]`,
+			wantAllowed: true,
+		},
+		{
+			name:       "single denied decision is still denied",
+			body:       `[{"accessDecision":"NotAllowed","actionId":"Microsoft.ContainerService/managedClusters/pods/write","isDataAction":true}]`,
+			wantDenied: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ConvertCheckAccessResponse(context.Background(), "testuser", []byte(tt.body))
+			if tt.wantErr {
+				assert.Error(t, err)
+				assert.Nil(t, got)
+				return
+			}
+			assert.NoError(t, err)
+			assert.NotNil(t, got)
+			assert.Equal(t, tt.wantAllowed, got.Allowed)
+			assert.Equal(t, tt.wantDenied, got.Denied)
+		})
+	}
+}
+
 func Test_buildCheckAccessV2URL(t *testing.T) {
 	tests := []struct {
 		name       string
