@@ -1,4 +1,7 @@
-* @kubeguard/reviewers
+# Owners need write access to Azure/guard; GitHub ignores any rule that names
+# a user or team without it.
+* @bingosummer @weinong @karataliu @chrischangcode @arxhive
 
-auth/providers/azure/* @kubeguard/azure-reviewers
-authz/providers/azure/* @kubeguard/azure-reviewers
+# Trailing slash so the rule covers the whole subtree, including rbac/.
+auth/providers/azure/ @bingosummer @karataliu @weinong @arxhive
+authz/providers/azure/ @bingosummer @karataliu @weinong @arxhive
