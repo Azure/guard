@@ -17,46 +17,81 @@ limitations under the License.
 package options
 
 import (
+	"slices"
 	"testing"
 
 	"go.kubeguard.dev/guard/auth/providers/azure"
+
+	"github.com/spf13/pflag"
+	apps "k8s.io/api/apps/v1"
+	core "k8s.io/api/core/v1"
 )
 
-// Test_NewOptionsAllowsCustomResourceTypeCheckByDefault pins the default of
-// AllowCustomResourceTypeCheck.
-//
-// The value of this option decides which DataAction a custom resource request
-// resolves to, and only the customresources form carries the customResources
-// group/kind attributes that a condition scoped to those attributes evaluates. A
-// deployment that does not pass the flag therefore inherits whichever behaviour
-// this default selects, so the default is itself the control - and it has to be the
-// one that leaves such conditions evaluable.
-func Test_NewOptionsAllowsCustomResourceTypeCheckByDefault(t *testing.T) {
-	if got := NewOptions().AllowCustomResourceTypeCheck; !got {
-		t.Errorf("NewOptions().AllowCustomResourceTypeCheck: want true, got %v", got)
-	}
-}
-
-// Test_ValidateAcceptsDefaultCustomResourceTypeCheck guards the default against a
-// validation rule that would make it unreachable.
-//
-// AllowCustomResourceTypeCheck defaults to true while DiscoverResources defaults to
-// false, so any rule rejecting that pair would reject every unconfigured deployment
-// and force operators to turn the check off to start guard at all. The pair is safe
-// because the check reports itself unavailable at request time when the operations
-// map is empty, which is what an absent discovery run leaves behind.
-func Test_ValidateAcceptsDefaultCustomResourceTypeCheck(t *testing.T) {
+func validAKSOptions() Options {
 	o := NewOptions()
 	o.AuthzMode = AKSAuthzMode
 	o.ResourceId = "/subscriptions/sub/resourcegroups/rg/providers/Microsoft.ContainerService/managedClusters/cluster"
 	o.AKSAuthzTokenURL = "https://localhost/authz/token"
+	return o
+}
 
-	if !o.AllowCustomResourceTypeCheck || o.DiscoverResources {
-		t.Fatalf("precondition: want AllowCustomResourceTypeCheck=true and DiscoverResources=false, got %v and %v",
-			o.AllowCustomResourceTypeCheck, o.DiscoverResources)
+func Test_AddFlags_defaultsEnableCustomResourceTypeCheckWithDiscovery(t *testing.T) {
+	o := NewOptions()
+	fs := pflag.NewFlagSet("guard", pflag.ContinueOnError)
+	o.AddFlags(fs)
+	if err := fs.Parse(nil); err != nil {
+		t.Fatalf("Parse(): %v", err)
 	}
 
-	if errs := o.Validate(azure.Options{}); len(errs) != 0 {
-		t.Errorf("Validate on default options: want no errors, got %v", errs)
+	if !o.AllowCustomResourceTypeCheck || !o.DiscoverResources {
+		t.Errorf("defaults: want AllowCustomResourceTypeCheck and DiscoverResources true, got %v and %v",
+			o.AllowCustomResourceTypeCheck, o.DiscoverResources)
+	}
+}
+
+// Turning discovery off must not stop guard from starting, so the check alone is never a validation error.
+func Test_Validate_customResourceTypeCheckWithAndWithoutDiscovery(t *testing.T) {
+	tests := []struct {
+		name              string
+		discoverResources bool
+	}{
+		{name: "defaults", discoverResources: true},
+		{name: "discovery disabled, check left on", discoverResources: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			o := validAKSOptions()
+			o.DiscoverResources = tt.discoverResources
+
+			if errs := o.Validate(azure.Options{}); len(errs) != 0 {
+				t.Errorf("Validate(): want no errors, got %v", errs)
+			}
+		})
+	}
+}
+
+func Test_Apply_rendersDiscoverResources(t *testing.T) {
+	tests := []struct {
+		name              string
+		discoverResources bool
+		want              string
+	}{
+		{name: "enabled", discoverResources: true, want: "--azure.discover-resources=true"},
+		{name: "disabled", discoverResources: false, want: "--azure.discover-resources=false"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			o := validAKSOptions()
+			o.DiscoverResources = tt.discoverResources
+			d := &apps.Deployment{}
+			d.Spec.Template.Spec.Containers = []core.Container{{}}
+
+			if _, err := o.Apply(d); err != nil {
+				t.Fatalf("Apply(): %v", err)
+			}
+			if args := d.Spec.Template.Spec.Containers[0].Args; !slices.Contains(args, tt.want) {
+				t.Errorf("Apply() args = %v, want %s", args, tt.want)
+			}
+		})
 	}
 }

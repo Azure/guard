@@ -86,7 +86,7 @@ func NewOptions() Options {
 		AllowCustomResourceTypeCheck:           true,
 		AllowSubresourceTypeCheck:              false,
 		UseNamespaceResourceScopeFormat:        false,
-		DiscoverResources:                      false,
+		DiscoverResources:                      true,
 		ReconcileDiscoverResourcesFrequency:    5 * time.Minute,
 		UseManagedNamespaceResourceScopeFormat: false,
 		FleetManagerResourceId:                 "",
@@ -107,12 +107,12 @@ func (o *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.StringSliceVar(&o.SkipAuthzCheck, "azure.skip-authz-check", o.SkipAuthzCheck, "name of usernames/email for which authz check will be skipped")
 	fs.BoolVar(&o.SkipAuthzForNonAADUsers, "azure.skip-authz-for-non-aad-users", o.SkipAuthzForNonAADUsers, "skip authz for non AAD users")
 	fs.BoolVar(&o.AllowNonResDiscoveryPathAccess, "azure.allow-nonres-discovery-path-access", o.AllowNonResDiscoveryPathAccess, "allow access on Non Resource paths required for discovery, setting it false will require explicit non resource path role assignment for all users in Azure RBAC")
-	fs.BoolVar(&o.AllowCustomResourceTypeCheck, "azure.allow-custom-resource-type-check", o.AllowCustomResourceTypeCheck, "resolve custom resource requests to the customresources DataAction so that conditions scoped to the customResources group/kind attributes are evaluated. Requires azure.discover-resources to take effect. Disabling this resolves custom resources to a per-apiGroup DataAction that carries no customResources attributes. Default: true")
+	fs.BoolVar(&o.AllowCustomResourceTypeCheck, "azure.allow-custom-resource-type-check", o.AllowCustomResourceTypeCheck, "resolve custom resource requests to the customresources DataAction so that conditions scoped to the customResources group/kind attributes are evaluated. Requires azure.discover-resources to take effect. Disabling this resolves custom resources to a per-apiGroup DataAction that carries no customResources attributes")
 	fs.BoolVar(&o.AllowSubresourceTypeCheck, "azure.allow-subresource-type-check", o.AllowSubresourceTypeCheck, "allow subresource type checks for authorization")
 	fs.BoolVar(&o.UseNamespaceResourceScopeFormat, "azure.use-ns-resource-scope-format", o.UseNamespaceResourceScopeFormat, "use namespace as resource scope format for making rbac checkaccess calls at namespace scope")
 	fs.StringVar(&o.KubeConfigFile, "azure.kubeconfig-file", "", "path to the kubeconfig of cluster.")
 	fs.BoolVar(&o.UseManagedNamespaceResourceScopeFormat, "azure.use-managed-namespace-resource-scope-format", o.UseManagedNamespaceResourceScopeFormat, "enable managed namespace RBAC for azure authz mode")
-	fs.BoolVar(&o.DiscoverResources, "azure.discover-resources", o.DiscoverResources, "fetch list of resources and operations from apiserver and azure. Default: false")
+	fs.BoolVar(&o.DiscoverResources, "azure.discover-resources", o.DiscoverResources, "fetch list of resources and operations from apiserver and azure. Required by azure.allow-custom-resource-type-check")
 	fs.DurationVar(&o.ReconcileDiscoverResourcesFrequency, "azure.discover-resources-frequency", o.ReconcileDiscoverResourcesFrequency, "Frequency at which discover resources should be reconciled. Default: 5m")
 	fs.BoolVar(&o.AuditSAR, "azure.audit-sar", o.AuditSAR, "enable audit of SAR requests in azure authz mode. Default: false")
 	fs.StringVar(&o.FleetManagerResourceId, "azure.fleet-resource-id", "", "azure kubernetes fleet manager resource id that the cluster has joined to (//subscriptions/<subName>/resourcegroups/<RGname>/providers/Microsoft.ContainerService/fleets/<fleetname>)")
@@ -158,12 +158,7 @@ func (o *Options) Validate(azure azure.Options) []error {
 		errs = append(errs, fmt.Errorf("azure.arm-call-limit must not be more than %d", maxPermissibleArmCallLimit))
 	}
 
-	// azure.allow-custom-resource-type-check intentionally does not require
-	// azure.discover-resources. The custom resource determination is driven by the
-	// operations map, which is only populated when discovery runs; without it the
-	// check reports itself unavailable at request time rather than failing config
-	// validation. Rejecting the combination here would make the secure default
-	// unusable for deployments that do not run discovery.
+	// The custom resource check without discovery is allowed so discovery can be turned off on its own; server startup warns.
 
 	if !o.DiscoverResources && o.AllowSubresourceTypeCheck {
 		errs = append(errs, errors.New("azure.discover-resources must also be enabled when azure.allow-subresource-type-check is enabled"))
@@ -216,6 +211,8 @@ func (o Options) Apply(d *apps.Deployment) (extraObjs []runtime.Object, err erro
 	args = append(args, fmt.Sprintf("--azure.skip-authz-for-non-aad-users=%t", o.SkipAuthzForNonAADUsers))
 
 	args = append(args, fmt.Sprintf("--azure.allow-nonres-discovery-path-access=%t", o.AllowNonResDiscoveryPathAccess))
+
+	args = append(args, fmt.Sprintf("--azure.discover-resources=%t", o.DiscoverResources))
 
 	args = append(args, fmt.Sprintf("--azure.allow-custom-resource-type-check=%t", o.AllowCustomResourceTypeCheck))
 

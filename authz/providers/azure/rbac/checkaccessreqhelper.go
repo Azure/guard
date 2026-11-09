@@ -312,20 +312,10 @@ func getDataActions(ctx context.Context, subRevReq *authzv1.SubjectAccessReviewS
 	if subRevReq.ResourceAttributes != nil {
 		storedOperationsMap := getStoredOperationsMap()
 
-		/*
-			A custom resource can only be recognised as one by its absence from the
-			operations map, so this check is unavailable until discovery has populated
-			that map. When it is unavailable the request falls through to the
-			per-apiGroup DataAction below (<clusterType>/<group>/<resource>/<verb>).
-			That form is not an authorable DataAction, so it is only ever satisfied by
-			a wildcard, and it carries none of the customResources attributes set by
-			setAuthInfoResourceAttributes - which means a condition scoped to those
-			attributes is not evaluated for the request. Keep this enabled unless a
-			deployment deliberately opts out.
-		*/
+		// A custom resource is recognised only by its absence from the operations map, which discovery fills.
 		isCustomerResourceTypeCheckAvailable := allowCustomResourceTypeCheck && len(storedOperationsMap) != 0
 		if !isCustomerResourceTypeCheckAvailable {
-			log.V(5).Info("CustomResourceTypeCheck unavailable; custom resources will resolve to a per-apiGroup DataAction without customResources attributes",
+			log.V(5).Info("CustomResourceTypeCheck unavailable; request is not classified as a custom resource",
 				"allowCustomResourceTypeCheck", allowCustomResourceTypeCheck, "operationsMapAvailable", len(storedOperationsMap) != 0)
 		}
 

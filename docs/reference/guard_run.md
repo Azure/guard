@@ -30,7 +30,7 @@ guard run [flags]
       --azure.authz-mode string                      authz mode to call RBAC api, valid values are either aks, arc, or fleet
       --azure.client-id string                       MS Graph application client ID to use
       --azure.client-secret string                   MS Graph application client secret to use
-      --azure.discover-resources                     fetch list of resources and operations from apiserver and azure. Default: false
+      --azure.discover-resources                     fetch list of resources and operations from apiserver and azure. Required by azure.allow-custom-resource-type-check (default true)
       --azure.enable-pop                             Enabling pop token verification
       --azure.environment string                     Azure cloud environment
       --azure.graph-call-on-overage-claim            set to true to resolve group membership only when overage claim is present. setting to false will always call graph api to resolve group membership
