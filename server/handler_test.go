@@ -22,13 +22,16 @@ import (
 	"crypto/tls"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"go.kubeguard.dev/guard/auth/providers/azure"
+	"go.kubeguard.dev/guard/auth/providers/azure/graph"
 	"go.kubeguard.dev/guard/auth/providers/github"
 	"go.kubeguard.dev/guard/auth/providers/gitlab"
 	"go.kubeguard.dev/guard/auth/providers/google"
 	"go.kubeguard.dev/guard/auth/providers/ldap"
+	errutils "go.kubeguard.dev/guard/util/error"
 
 	fuzz "github.com/google/gofuzz"
 	"github.com/pkg/errors"
@@ -176,5 +179,42 @@ func TestGetAuthProviderClient(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestAzureDependencyTokenReviewResponse(t *testing.T) {
+	const sensitive = "sensitive-upstream-body-and-token"
+	for _, upstreamStatus := range []int{http.StatusBadRequest, http.StatusInternalServerError} {
+		upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			writer.WriteHeader(upstreamStatus)
+			_, _ = writer.Write([]byte(`{"error":"invalid_grant","error_codes":[53003],"error_description":"` + sensitive + `"}`))
+		}))
+		provider := graph.NewAKSTokenProvider(upstream.URL, "tenant")
+		_, dependencyErr := provider.Acquire(context.Background(), sensitive)
+		upstream.Close()
+		if dependencyErr == nil {
+			t.Fatal("expected upstream failure")
+		}
+		for _, status := range []int{http.StatusUnauthorized, http.StatusOK} {
+			responseErr := dependencyErr
+			if status == http.StatusOK {
+				responseErr = errutils.WithCode(dependencyErr, http.StatusOK)
+			}
+			writer := httptest.NewRecorder()
+			write(writer, nil, responseErr)
+			if writer.Code != status {
+				t.Errorf("expected unchanged webhook status %d, got %d", status, writer.Code)
+			}
+			var review auth.TokenReview
+			if err := json.Unmarshal(writer.Body.Bytes(), &review); err != nil {
+				t.Fatal(err)
+			}
+			if review.Status.Authenticated || !strings.Contains(review.Status.Error, "reason=OBO_POLICY_BLOCKED") {
+				t.Errorf("expected safe negative TokenReview: %+v", review.Status)
+			}
+			if strings.Contains(writer.Body.String(), sensitive) {
+				t.Error("TokenReview exposed raw upstream response")
+			}
+		}
 	}
 }

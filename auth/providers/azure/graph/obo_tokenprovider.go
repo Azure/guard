@@ -18,16 +18,13 @@ package graph
 
 import (
 	"context"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
 
 	"go.kubeguard.dev/guard/util/httpclient"
 
-	"github.com/moul/http2curl"
 	"github.com/pkg/errors"
-	"k8s.io/klog/v2"
 )
 
 type oboTokenProvider struct {
@@ -69,26 +66,22 @@ func (u *oboTokenProvider) Acquire(ctx context.Context, token string) (AuthRespo
 		return authResp, errors.Wrap(err, "failed to create request")
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	if klog.V(10).Enabled() {
-		cmd, _ := http2curl.GetCurlCommand(req)
-		klog.V(10).Infoln(cmd)
-	}
+	addDependencyCorrelation(req)
 
 	resp, err := u.client.Do(req.WithContext(ctx))
 	if err != nil {
-		return authResp, errors.Wrap(err, "failed to send request")
+		return authResp, dependencyFailure(ctx, "obo", "entra_obo", req, nil, err)
 	}
 	defer func() {
 		_ = resp.Body.Close()
 	}()
 
 	if resp.StatusCode != http.StatusOK {
-		data, _ := io.ReadAll(resp.Body)
-		return authResp, errors.Errorf("request %s failed with status code: %d and response: %s", req.URL.Path, resp.StatusCode, string(data))
+		return authResp, dependencyFailure(ctx, "obo", "entra_obo", req, resp, nil)
 	}
 	err = json.NewDecoder(resp.Body).Decode(&authResp)
 	if err != nil {
-		return authResp, errors.Wrapf(err, "failed to decode response for request %s", req.URL.Path)
+		return authResp, dependencyFailure(ctx, "obo", "entra_obo", req, resp, err)
 	}
 
 	return authResp, nil

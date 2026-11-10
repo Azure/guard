@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -164,6 +165,16 @@ func TestLogin(t *testing.T) {
 			t.Error("Should have gotten error")
 		}
 	})
+	t.Run("preserve structured OBO failure through token refresh", func(t *testing.T) {
+		server, userInfo := getAuthServerAndUserInfo(http.StatusBadRequest, `{"error_codes":[53003]}`, "client", "secret")
+		defer server.Close()
+		userInfo.tokenProvider = NewAKSTokenProvider(server.URL, "tenant")
+		err := userInfo.RefreshToken(ctx, "assertion")
+		var failure *dependencyError
+		if !errors.As(err, &failure) || failure.reason != "OBO_POLICY_BLOCKED" {
+			t.Fatalf("expected structured policy evidence to survive wrapping: %v", err)
+		}
+	})
 }
 
 func getAPIServerAndUserInfo(returnCode int, body string) (*httptest.Server, *UserInfo) {
@@ -244,6 +255,51 @@ func TestGetGroupIDs(t *testing.T) {
 			t.Error("Group list should be nil")
 		}
 	})
+}
+
+func TestGraphFailureDiagnostics(t *testing.T) {
+	const sensitive = "sensitive-principal-and-upstream-body"
+	testCases := []struct {
+		name   string
+		status int
+		body   string
+		reason string
+	}{
+		{"permission denied", http.StatusForbidden, `{"error":{"code":"Authorization_RequestDenied","message":"` + sensitive + `","innerError":{"request-id":"6e73da71-96a3-4415-8c6a-a940cb1ba052"}}}`, "responseClass=client_error"},
+		{"throttled", http.StatusTooManyRequests, `{"error":{"code":"TooManyRequests","message":"` + sensitive + `"}}`, "responseClass=client_error"},
+		{"malformed response", http.StatusOK, sensitive, "responseClass=invalid_response"},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			server, userInfo := getAPIServerAndUserInfo(testCase.status, testCase.body)
+			defer server.Close()
+			userInfo.headers.Set("Authorization", "Bearer "+sensitive)
+			for _, servicePrincipal := range []bool{false, true} {
+				_, err := userInfo.getGroupIDs(context.Background(), sensitive, servicePrincipal)
+				assertGraphDiagnostic(t, err, sensitive, testCase.reason)
+			}
+			_, err := userInfo.getExpandedGroups(context.Background(), []string{sensitive})
+			assertGraphDiagnostic(t, err, sensitive, testCase.reason)
+			if userInfo.headers.Get("client-request-id") != "" {
+				t.Error("per-request correlation ID mutated shared Graph headers")
+			}
+		})
+	}
+}
+
+func assertGraphDiagnostic(t *testing.T, err error, sensitive, responseClass string) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("expected Graph failure")
+	}
+	for _, expected := range []string{"stage=graph", "dependency=ms_graph", "reason=GRAPH_FAILED", "faultDomain=unknown", responseClass} {
+		if !strings.Contains(err.Error(), expected) {
+			t.Errorf("missing %q in diagnostic: %s", expected, err)
+		}
+	}
+	if strings.Contains(err.Error(), sensitive) {
+		t.Errorf("diagnostic exposed sensitive data: %s", err)
+	}
 }
 
 func TestGetExpandedGroups(t *testing.T) {
@@ -578,7 +634,7 @@ func TestGetGroupsForServicePrincipal(t *testing.T) {
 		if groups != nil {
 			t.Error("Group list should be nil")
 		}
-		if !strings.Contains(err.Error(), "failed with status code: 500") {
+		if !strings.Contains(err.Error(), "upstreamStatus=500") {
 			t.Errorf("Expected status code in error, got: %s", err.Error())
 		}
 	})
@@ -613,7 +669,7 @@ func TestGetGroupsForServicePrincipal(t *testing.T) {
 		if groups != nil {
 			t.Error("Group list should be nil")
 		}
-		if !strings.Contains(err.Error(), "failed to decode response for request") {
+		if !strings.Contains(err.Error(), "responseClass=invalid_response") {
 			t.Errorf("Expected decode error, got: %s", err.Error())
 		}
 	})

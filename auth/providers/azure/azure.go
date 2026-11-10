@@ -33,6 +33,7 @@ import (
 	"github.com/Azure/go-autorest/autorest/azure"
 	"github.com/coreos/go-oidc"
 	"github.com/golang-jwt/jwt/v4"
+	"github.com/google/uuid"
 	"github.com/hashicorp/go-retryablehttp"
 	"github.com/pkg/errors"
 	authv1 "k8s.io/api/authentication/v1"
@@ -237,6 +238,9 @@ func (s Authenticator) UID() string {
 }
 
 func (s Authenticator) Check(ctx context.Context, token string) (*authv1.UserInfo, error) {
+	requestID := uuid.New().String()
+	ctx = azureutils.WithRequestID(ctx, requestID)
+	ctx = klog.NewContext(ctx, klog.FromContext(ctx).WithValues("requestID", requestID))
 	var err error
 
 	if s.EnablePOP {
@@ -249,11 +253,6 @@ func (s Authenticator) Check(ctx context.Context, token string) (*authv1.UserInf
 	ctx = azureutils.WithRetryableHttpClient(ctx, s.HttpClientRetryCount)
 	verifiedToken, err := s.verifier.Verify(ctx, token)
 	if err != nil {
-		if klog.V(7).Enabled() {
-			if claims, err := extractTokenClaims(token); err == nil {
-				klog.V(7).Infof("token claims: %s", claims)
-			}
-		}
 		return nil, errors.Wrap(err, "failed to verify token for azure")
 	}
 
