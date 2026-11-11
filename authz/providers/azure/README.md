@@ -342,10 +342,19 @@ Guard can authorize access to Custom Resources (CRDs) not defined in the standar
 
 ### Enabling CRD Support
 
+CRD support is on by default: `--azure.discover-resources` and
+`--azure.allow-custom-resource-type-check` both default to `true`. The check needs
+discovery, because only discovery fills the operations map that tells a custom resource
+from a built-in one. If discovery is off, Guard logs a warning at startup and resolves
+custom resources to a per-apiGroup DataAction without the `customResources` attributes.
+
+Discovery reads the cluster from `--azure.kubeconfig-file`, or from the in-cluster
+config when the flag is not set. When Guard runs outside the cluster it authorizes, set
+the kubeconfig. To turn CRD support off:
+
 ```bash
 guard run \
-  --azure.discover-resources=true \
-  --azure.allow-custom-resource-type-check=true \
+  --azure.allow-custom-resource-type-check=false \
   # ... other flags
 ```
 
@@ -353,7 +362,7 @@ guard run \
 
 1. **Resource Discovery**: Guard periodically discovers available resources from the Kubernetes API
 2. **Operations Map**: Builds a map of group → resource → verb → action
-3. **CRD Detection**: If a requested resource is not in the operations map, it's treated as a custom resource
+3. **CRD Detection**: If a requested resource is not in the operations map, it's treated as a custom resource. This includes built-in resources that have no published ARM operation
 4. **Action Mapping**: Custom resources use `<clusterType>/customresources/<action>` format
 
 ### Azure Role Assignment for CRDs
@@ -634,9 +643,9 @@ AKS_AUTHZ_TOKEN_URL="https://${FQDN}:443/authz/token"
 | `--azure.skip-authz-check`                   | Users/groups to skip           | []      |
 | `--azure.skip-authz-for-non-aad-users`       | Allow non-AAD users            | true    |
 | `--azure.allow-nonres-discovery-path-access` | Allow /api, /openapi           | true    |
-| `--azure.discover-resources`                 | Enable resource discovery      | false   |
+| `--azure.discover-resources`                 | Enable resource discovery      | true    |
 | `--azure.discover-resources-frequency`       | Discovery refresh interval     | 5m      |
-| `--azure.allow-custom-resource-type-check`   | Enable CRD support             | false   |
+| `--azure.allow-custom-resource-type-check`   | Enable CRD support             | true    |
 | `--azure.allow-subresource-type-check`       | Enable subresource perms       | false   |
 | `--azure.audit-sar`                          | Log all SAR requests           | false   |
 

@@ -337,9 +337,11 @@ func getDataActions(ctx context.Context, subRevReq *authzv1.SubjectAccessReviewS
 	if subRevReq.ResourceAttributes != nil {
 		storedOperationsMap := getStoredOperationsMap()
 
+		// A custom resource is recognised only by its absence from the operations map, which discovery fills.
 		isCustomerResourceTypeCheckAvailable := allowCustomResourceTypeCheck && len(storedOperationsMap) != 0
 		if !isCustomerResourceTypeCheckAvailable {
-			log.V(5).Info("CustomResourceTypeCheck feature is not available", "allowCustomResourceTypeCheck", allowCustomResourceTypeCheck, "operationsMapAvailable", len(storedOperationsMap) != 0)
+			log.V(5).Info("CustomResourceTypeCheck unavailable; request is not classified as a custom resource",
+				"allowCustomResourceTypeCheck", allowCustomResourceTypeCheck, "operationsMapAvailable", len(storedOperationsMap) != 0)
 		}
 
 		if subRevReq.ResourceAttributes.Resource != "*" && subRevReq.ResourceAttributes.Group != "*" && subRevReq.ResourceAttributes.Verb != "*" {

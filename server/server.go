@@ -280,6 +280,8 @@ func (s Server) ListenAndServe() {
 				go func() {
 					wg.Wait()
 				}()
+			} else if s.AuthzRecommendedOptions.Azure.AllowCustomResourceTypeCheck {
+				klog.Warning("azure.allow-custom-resource-type-check has no effect because azure.discover-resources is disabled: custom resources resolve to per-apiGroup DataActions without customResources attributes")
 			}
 		}
 	}

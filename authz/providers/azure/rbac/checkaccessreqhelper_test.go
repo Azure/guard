@@ -39,6 +39,16 @@ const (
 	resourceId      = "resourceId"
 	aksClusterType  = "aks"
 	subresourceAttr = "Microsoft.ContainerService/managedClusters/resources:subresource"
+
+	customResourceGroupAttr = "Microsoft.ContainerService/managedClusters/customResources:group"
+	customResourceKindAttr  = "Microsoft.ContainerService/managedClusters/customResources:kind"
+
+	alphaGroup = "alpha.example.com"
+	alphaKind  = "widgets"
+	betaGroup  = "beta.example.com"
+	betaKind   = "gadgets"
+
+	verbPatch = "patch"
 )
 
 func createOperationsMap(clusterType string) azureutils.OperationsMap {
@@ -1195,6 +1205,7 @@ func Test_prepareCheckAccessRequestBodyWithCustomResource(t *testing.T) {
 	}
 }
 
+// Without discovery the operations map is empty, so a custom resource keeps the per-apiGroup DataAction and no attributes.
 func Test_prepareCheckAccessRequestBodyWithCustomResourceOperationsMapEmpty(t *testing.T) {
 	req := &authzv1.SubjectAccessReviewSpec{
 		ResourceAttributes: &authzv1.ResourceAttributes{
@@ -1227,6 +1238,7 @@ func Test_prepareCheckAccessRequestBodyWithCustomResourceOperationsMapEmpty(t *t
 	}
 }
 
+// The explicit opt-out keeps the per-apiGroup DataAction, which carries no customResources attributes.
 func Test_prepareCheckAccessRequestBodyWithCustomResourceTypeCheckDisabled(t *testing.T) {
 	req := &authzv1.SubjectAccessReviewSpec{
 		ResourceAttributes: &authzv1.ResourceAttributes{
@@ -1259,6 +1271,94 @@ func Test_prepareCheckAccessRequestBodyWithCustomResourceTypeCheckDisabled(t *te
 	}
 }
 
+// Checks attribute values, not just keys, so a condition can deny a request for another group's resource.
+func Test_prepareCheckAccessRequestBodyCustomResourceConditionIsEvaluable(t *testing.T) {
+	tests := []struct {
+		name       string
+		group      string
+		resource   string
+		verb       string
+		wantAction string
+	}{
+		{"inConditionRead", alphaGroup, alphaKind, "get", "aks/customresources/read"},
+		{"inConditionList", alphaGroup, alphaKind, "list", "aks/customresources/read"},
+		{"outOfConditionRead", betaGroup, betaKind, "get", "aks/customresources/read"},
+		{"outOfConditionPatch", betaGroup, betaKind, verbPatch, "aks/customresources/write"},
+		{"outOfConditionCreate", betaGroup, betaKind, "create", "aks/customresources/write"},
+		{"outOfConditionDelete", betaGroup, betaKind, "delete", "aks/customresources/delete"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := &authzv1.SubjectAccessReviewSpec{
+				ResourceAttributes: &authzv1.ResourceAttributes{
+					Namespace: "dev",
+					Group:     tt.group,
+					Resource:  tt.resource,
+					Version:   "v1",
+					Verb:      tt.verb,
+				},
+				Extra: map[string]authzv1.ExtraValue{"oid": {uuid.NewString()}},
+			}
+
+			clusterType := aksClusterType
+			setStoredOperationsMap(t, createOperationsMap(clusterType))
+
+			got, err := prepareCheckAccessRequestBody(context.Background(), req, clusterType, resourceId, false, true, false)
+			if err != nil {
+				t.Fatalf("prepareCheckAccessRequestBody returned error: %v", err)
+			}
+			if len(got) == 0 || len(got[0].Actions) == 0 {
+				t.Fatalf("Want: at least one action, got: %v", got)
+			}
+
+			action := got[0].Actions[0]
+			if action.AuthorizationEntity.Id != tt.wantAction {
+				t.Errorf("action Id: want %q, got %q", tt.wantAction, action.AuthorizationEntity.Id)
+			}
+			if got := action.Attributes[customResourceGroupAttr]; got != tt.group {
+				t.Errorf("%s: want %q, got %q", customResourceGroupAttr, tt.group, got)
+			}
+			if got := action.Attributes[customResourceKindAttr]; got != tt.resource {
+				t.Errorf("%s: want %q, got %q", customResourceKindAttr, tt.resource, got)
+			}
+		})
+	}
+}
+
+// A built-in in the operations map keeps its own DataAction and gains no customResources attributes.
+func Test_prepareCheckAccessRequestBodyBuiltInResourceIsUnaffected(t *testing.T) {
+	req := &authzv1.SubjectAccessReviewSpec{
+		ResourceAttributes: &authzv1.ResourceAttributes{
+			Namespace: "dev",
+			Group:     "apps",
+			Resource:  "deployments",
+			Version:   "v1",
+			Verb:      "get",
+		},
+		Extra: map[string]authzv1.ExtraValue{"oid": {uuid.NewString()}},
+	}
+
+	clusterType := aksClusterType
+	setStoredOperationsMap(t, createOperationsMap(clusterType))
+
+	got, err := prepareCheckAccessRequestBody(context.Background(), req, clusterType, resourceId, false, true, false)
+	if err != nil {
+		t.Fatalf("prepareCheckAccessRequestBody returned error: %v", err)
+	}
+	if len(got) == 0 || len(got[0].Actions) == 0 {
+		t.Fatalf("Want: at least one action, got: %v", got)
+	}
+
+	action := got[0].Actions[0]
+	if want := "aks/apps/deployments/read"; action.AuthorizationEntity.Id != want {
+		t.Errorf("action Id: want %q, got %q", want, action.AuthorizationEntity.Id)
+	}
+	if len(action.Attributes) != 0 {
+		t.Errorf("built-in resource must carry no customResources attributes, got %v", action.Attributes)
+	}
+}
+
 func Test_prepareCheckAccessRequestBodyWithCustomResourceAndStars(t *testing.T) {
 	req := &authzv1.SubjectAccessReviewSpec{
 		ResourceAttributes: &authzv1.ResourceAttributes{
@@ -1288,16 +1388,16 @@ func Test_prepareCheckAccessRequestBodyWithCustomResourceAndStars(t *testing.T) 
 
 	customResourceActions := []azureutils.AuthorizationActionInfo{
 		{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/customresources/read"}, IsDataAction: true, Attributes: map[string]string{
-			"Microsoft.ContainerService/managedClusters/customResources:kind":  "*",
-			"Microsoft.ContainerService/managedClusters/customResources:group": "customresources.contoso.io",
+			customResourceKindAttr:  "*",
+			customResourceGroupAttr: "customresources.contoso.io",
 		}},
 		{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/customresources/write"}, IsDataAction: true, Attributes: map[string]string{
-			"Microsoft.ContainerService/managedClusters/customResources:kind":  "*",
-			"Microsoft.ContainerService/managedClusters/customResources:group": "customresources.contoso.io",
+			customResourceKindAttr:  "*",
+			customResourceGroupAttr: "customresources.contoso.io",
 		}},
 		{AuthorizationEntity: azureutils.AuthorizationEntity{Id: "aks/customresources/delete"}, IsDataAction: true, Attributes: map[string]string{
-			"Microsoft.ContainerService/managedClusters/customResources:kind":  "*",
-			"Microsoft.ContainerService/managedClusters/customResources:group": "customresources.contoso.io",
+			customResourceKindAttr:  "*",
+			customResourceGroupAttr: "customresources.contoso.io",
 		}},
 	}
 
