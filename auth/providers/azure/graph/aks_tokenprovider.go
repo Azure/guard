@@ -19,7 +19,6 @@ package graph
 import (
 	"bytes"
 	"context"
-	"io"
 	"net/http"
 
 	"go.kubeguard.dev/guard/util/httpclient"
@@ -81,22 +80,22 @@ func (u *aksTokenProvider) Acquire(ctx context.Context, token string) (AuthRespo
 		return authResp, errors.Wrap(err, "failed to create request")
 	}
 	req.Header.Set("Content-Type", "application/json")
+	addDependencyCorrelation(req)
 
 	resp, err := u.client.Do(req.WithContext(ctx))
 	if err != nil {
-		return authResp, errors.Wrap(err, "failed to send request")
+		return authResp, dependencyFailure(ctx, "obo", "aks_obo", req, nil, err)
 	}
 	defer func() {
 		_ = resp.Body.Close()
 	}()
 
 	if resp.StatusCode != http.StatusOK {
-		data, _ := io.ReadAll(resp.Body)
-		return authResp, errors.Errorf("request failed with status code: %d and response: %s", resp.StatusCode, string(data))
+		return authResp, dependencyFailure(ctx, "obo", "aks_obo", req, resp, nil)
 	}
 	err = json.NewDecoder(resp.Body).Decode(&authResp)
 	if err != nil {
-		return authResp, errors.Wrapf(err, "failed to decode response")
+		return authResp, dependencyFailure(ctx, "obo", "aks_obo", req, resp, err)
 	}
 
 	return authResp, nil

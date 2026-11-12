@@ -35,7 +35,6 @@ import (
 	"github.com/golang-jwt/jwt"
 	"github.com/google/uuid"
 	jsoniter "github.com/json-iterator/go"
-	"github.com/moul/http2curl"
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -128,7 +127,8 @@ func (u *UserInfo) getGroupIDs(ctx context.Context, principal string, isServiceP
 		return nil, errors.Wrap(err, "error creating group IDs request")
 	}
 	// Set the auth headers for the request
-	req.Header = u.headers
+	req.Header = u.headers.Clone()
+	addDependencyCorrelation(req)
 
 	resp, err := u.client.Do(req.WithContext(ctx))
 	if err != nil {
@@ -137,22 +137,21 @@ func (u *UserInfo) getGroupIDs(ctx context.Context, principal string, isServiceP
 		} else {
 			getMemberGroupsFailed.Inc()
 		}
-		return nil, errors.Wrapf(err, "error listing group memberships for %s", resource)
+		return nil, dependencyFailure(ctx, "graph", "ms_graph", req, nil, err)
 	}
 	defer func() {
 		_ = resp.Body.Close()
 	}()
 
 	if resp.StatusCode != http.StatusOK {
-		data, _ := io.ReadAll(resp.Body)
-		return nil, errors.Errorf("request %s failed with status code: %d and response: %s", req.URL.Path, resp.StatusCode, string(data))
+		return nil, dependencyFailure(ctx, "graph", "ms_graph", req, resp, nil)
 	}
 
 	// Decode the group response
 	objects := ObjectList{}
 	err = json.NewDecoder(resp.Body).Decode(&objects)
 	if err != nil {
-		return nil, errors.Wrapf(err, "failed to decode response for request %s", req.URL.Path)
+		return nil, dependencyFailure(ctx, "graph", "ms_graph", req, resp, err)
 	}
 	return objects.Value, nil
 }
@@ -178,31 +177,26 @@ func (u *UserInfo) getExpandedGroups(ctx context.Context, ids []string) (*GroupL
 		return nil, errors.Wrap(err, "error creating group expansion request")
 	}
 	// Set the auth headers
-	req.Header = u.headers
-
-	if klog.V(10).Enabled() {
-		cmd, _ := http2curl.GetCurlCommand(req)
-		klog.V(10).Infoln(cmd)
-	}
+	req.Header = u.headers.Clone()
+	addDependencyCorrelation(req)
 
 	resp, err := u.client.Do(req.WithContext(ctx))
 	if err != nil {
-		return nil, errors.Wrap(err, "error expanding groups")
+		return nil, dependencyFailure(ctx, "graph", "ms_graph", req, nil, err)
 	}
 	defer func() {
 		_ = resp.Body.Close()
 	}()
 
 	if resp.StatusCode != http.StatusOK {
-		data, _ := io.ReadAll(resp.Body)
-		return nil, errors.Errorf("request %s failed with status code: %d and response: %s", req.URL.Path, resp.StatusCode, string(data))
+		return nil, dependencyFailure(ctx, "graph", "ms_graph", req, resp, nil)
 	}
 
 	// Decode the response
 	groups := &GroupList{}
 	err = json.NewDecoder(resp.Body).Decode(groups)
 	if err != nil {
-		return nil, errors.Wrapf(err, "failed to decode response for request %s", req.URL.Path)
+		return nil, dependencyFailure(ctx, "graph", "ms_graph", req, resp, err)
 	}
 	return groups, nil
 }
@@ -364,7 +358,7 @@ func (u *UserInfo) RefreshToken(ctx context.Context, token string) error {
 	if u.isTokenExpired() {
 		resp, err := u.tokenProvider.Acquire(ctx, token)
 		if err != nil {
-			return errors.Errorf("%s: failed to refresh token: %s", u.tokenProvider.Name(), err)
+			return errors.Wrapf(err, "%s: failed to refresh token", u.tokenProvider.Name())
 		}
 		klog.Infof("Token received, expires_at %d", resp.ExpiresOn)
 		// Set the authorization headers for future requests

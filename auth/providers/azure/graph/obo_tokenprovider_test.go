@@ -21,7 +21,11 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+
+	"github.com/go-logr/logr/funcr"
+	"k8s.io/klog/v2"
 )
 
 func TestOBOTokenProvider(t *testing.T) {
@@ -131,6 +135,33 @@ func TestOBOTokenProvider(t *testing.T) {
 			t.Errorf("expected token type: %s should be empty", resp.TokenType)
 		}
 	})
+}
+
+func TestOBOTokenProviderDiagnostics(t *testing.T) {
+	const sensitive = "sensitive-client-secret-and-assertion"
+	server := startTestServer(t, func(writer http.ResponseWriter, request *http.Request) {
+		writer.WriteHeader(http.StatusBadRequest)
+		_, _ = writer.Write([]byte(`{"error":"invalid_grant","error_codes":[53003],"error_description":"` + sensitive + `"}`))
+	})
+	defer stopTestServer(t, server)
+	var logs strings.Builder
+	logger := funcr.New(func(prefix, args string) {
+		logs.WriteString(prefix)
+		logs.WriteString(args)
+	}, funcr.Options{Verbosity: 10})
+	provider := NewOBOTokenProvider("client", sensitive, server.URL, "scope")
+	_, err := provider.Acquire(klog.NewContext(context.Background(), logger), sensitive)
+	if err == nil {
+		t.Fatal("expected acquisition failure")
+	}
+	for _, expected := range []string{"dependency=entra_obo", "reason=OBO_POLICY_BLOCKED", "upstreamStatus=400"} {
+		if !strings.Contains(err.Error(), expected) {
+			t.Errorf("missing %q in diagnostic: %v", expected, err)
+		}
+	}
+	if strings.Contains(fmt.Sprintf("%+v", err), sensitive) || strings.Contains(logs.String(), sensitive) {
+		t.Error("OBO error or verbose log exposed a credential or upstream body")
+	}
 }
 
 func startTestServer(t *testing.T, handler func(rw http.ResponseWriter, req *http.Request)) *httptest.Server {
